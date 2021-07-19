@@ -48,6 +48,7 @@ from lib.core.settings import IDENTYWAF_PARSE_LIMIT
 from lib.core.settings import MAX_CONNECTION_TOTAL_SIZE
 from lib.core.settings import META_CHARSET_REGEX
 from lib.core.settings import PARSE_HEADERS_LIMIT
+from lib.core.settings import PRINTABLE_BYTES
 from lib.core.settings import SELECT_FROM_TABLE_REGEX
 from lib.core.settings import UNICODE_ENCODING
 from lib.core.settings import VIEWSTATE_REGEX
@@ -259,7 +260,7 @@ def getHeuristicCharEncoding(page):
     """
 
     key = hash(page)
-    retVal = kb.cache.encoding.get(key) or detect(page[:HEURISTIC_PAGE_SIZE_THRESHOLD])["encoding"]
+    retVal = kb.cache.encoding[key] if key in kb.cache.encoding else detect(page[:HEURISTIC_PAGE_SIZE_THRESHOLD])["encoding"]
     kb.cache.encoding[key] = retVal
 
     if retVal and retVal.lower().replace('-', "") == UNICODE_ENCODING.lower().replace('-', ""):
@@ -324,7 +325,7 @@ def decodePage(page, contentEncoding, contentType, percentDecode=True):
 
         metaCharset = checkCharEncoding(extractRegexResult(META_CHARSET_REGEX, page))
 
-        if (any((httpCharset, metaCharset)) and not all((httpCharset, metaCharset))) or (httpCharset == metaCharset and all((httpCharset, metaCharset))):
+        if (any((httpCharset, metaCharset)) and (not all((httpCharset, metaCharset)) or isinstance(page, six.binary_type) and all(_ in PRINTABLE_BYTES for _ in page))) or (httpCharset == metaCharset and all((httpCharset, metaCharset))):
             kb.pageEncoding = httpCharset or metaCharset  # Reference: http://bytes.com/topic/html-css/answers/154758-http-equiv-vs-true-header-has-precedence
             debugMsg = "declared web page charset '%s'" % kb.pageEncoding
             singleTimeLogMessage(debugMsg, logging.DEBUG, debugMsg)

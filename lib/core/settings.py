@@ -11,14 +11,16 @@ import random
 import re
 import string
 import sys
+import time
 
 from lib.core.enums import DBMS
 from lib.core.enums import DBMS_DIRECTORY_NAME
 from lib.core.enums import OS
+from thirdparty import six
 from thirdparty.six import unichr as _unichr
 
 # sqlmap version (<major>.<minor>.<month>.<monthly commit>)
-VERSION = "1.5.2.26"
+VERSION = "1.5.7.6"
 TYPE = "dev" if VERSION.count('.') > 2 and VERSION.split('.')[-1] != '0' else "stable"
 TYPE_COLORS = {"dev": 33, "stable": 90, "pip": 34}
 VERSION_STRING = "sqlmap/%s#%s" % ('.'.join(VERSION.split('.')[:-1]) if VERSION.count('.') > 2 and VERSION.split('.')[-1] == '0' else VERSION, TYPE)
@@ -105,7 +107,7 @@ FUZZ_UNION_ERROR_REGEX = r"(?i)data\s?type|comparable|compatible|conversion|conv
 FUZZ_UNION_MAX_COLUMNS = 10
 
 # Regular expression used for recognition of generic maximum connection messages
-MAX_CONNECTIONS_REGEX = r"\bmax.+?\bconnection"
+MAX_CONNECTIONS_REGEX = r"\bmax.{1,100}\bconnection"
 
 # Maximum consecutive connection errors before asking the user if he wants to continue
 MAX_CONSECUTIVE_CONNECTION_ERRORS = 15
@@ -124,6 +126,9 @@ MAX_MURPHY_SLEEP_TIME = 3
 
 # Regular expression used for extracting results from Google search
 GOOGLE_REGEX = r"webcache\.googleusercontent\.com/search\?q=cache:[^:]+:([^+]+)\+&amp;cd=|url\?\w+=((?![^>]+webcache\.googleusercontent\.com)http[^>]+)&(sa=U|rct=j)"
+
+# Google Search consent cookie
+GOOGLE_CONSENT_COOKIE = "CONSENT=YES+shp.gws-%s-0-RC1.%s+FX+740" % (time.strftime("%Y%m%d"), "".join(random.sample(string.ascii_lowercase, 2)))
 
 # Regular expression used for extracting results from DuckDuckGo search
 DUCKDUCKGO_REGEX = r'<a class="result__url" href="(htt[^"]+)'
@@ -288,7 +293,7 @@ VIRTUOSO_SYSTEM_DBS = ("",)
 # Note: (<regular>) + (<forks>)
 MSSQL_ALIASES = ("microsoft sql server", "mssqlserver", "mssql", "ms")
 MYSQL_ALIASES = ("mysql", "my") + ("mariadb", "maria", "memsql", "tidb", "percona", "drizzle")
-PGSQL_ALIASES = ("postgresql", "postgres", "pgsql", "psql", "pg") + ("cockroach", "cockroachdb", "redshift", "greenplum", "yellowbrick", "enterprisedb", "yugabyte", "yugabytedb")
+PGSQL_ALIASES = ("postgresql", "postgres", "pgsql", "psql", "pg") + ("cockroach", "cockroachdb", "amazon redshift", "redshift", "greenplum", "yellowbrick", "enterprisedb", "yugabyte", "yugabytedb")
 ORACLE_ALIASES = ("oracle", "orcl", "ora", "or")
 SQLITE_ALIASES = ("sqlite", "sqlite3")
 ACCESS_ALIASES = ("microsoft access", "msaccess", "access", "jet")
@@ -297,7 +302,7 @@ MAXDB_ALIASES = ("max", "maxdb", "sap maxdb", "sap db")
 SYBASE_ALIASES = ("sybase", "sybase sql server")
 DB2_ALIASES = ("db2", "ibm db2", "ibmdb2")
 HSQLDB_ALIASES = ("hsql", "hsqldb", "hs", "hypersql")
-H2_ALIASES = ("h2", "ignite")
+H2_ALIASES = ("h2",) + ("ignite", "apache ignite")
 INFORMIX_ALIASES = ("informix", "ibm informix", "ibminformix")
 MONETDB_ALIASES = ("monet", "monetdb",)
 DERBY_ALIASES = ("derby", "apache derby",)
@@ -504,6 +509,9 @@ REFLECTED_MAX_REGEX_PARTS = 10
 
 # Chars which can be used as a failsafe values in case of too long URL encoding value
 URLENCODE_FAILSAFE_CHARS = "()|,"
+
+# Factor used for yuge page multiplication
+YUGE_FACTOR = 1000
 
 # Maximum length of URL encoded value after which failsafe procedure takes away
 URLENCODE_CHAR_LIMIT = 2000
@@ -898,6 +906,9 @@ KB_CHARS_BOUNDARY_CHAR = 'q'
 
 # Letters of lower frequency used in kb.chars
 KB_CHARS_LOW_FREQUENCY_ALPHABET = "zqxjkvbp"
+
+# Printable bytes
+PRINTABLE_BYTES = set(bytes(string.printable, "ascii") if six.PY3 else string.printable)
 
 # SQL keywords used for splitting in HTTP chunked transfer encoded requests (switch --chunk)
 HTTP_CHUNKED_SPLIT_KEYWORDS = ("SELECT", "UPDATE", "INSERT", "FROM", "LOAD_FILE", "UNION", "information_schema", "sysdatabases", "msysaccessobjects", "msysqueries", "sysmodules")

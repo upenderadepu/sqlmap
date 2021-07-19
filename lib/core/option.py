@@ -76,6 +76,7 @@ from lib.core.enums import ADJUST_TIME_DELAY
 from lib.core.enums import AUTH_TYPE
 from lib.core.enums import CUSTOM_LOGGING
 from lib.core.enums import DUMP_FORMAT
+from lib.core.enums import FORK
 from lib.core.enums import HTTP_HEADER
 from lib.core.enums import HTTPMETHOD
 from lib.core.enums import MKSTEMP_PREFIX
@@ -727,7 +728,7 @@ def _setDBMS():
 
     if conf.dbms not in SUPPORTED_DBMS:
         errMsg = "you provided an unsupported back-end database management "
-        errMsg += "system. Supported DBMSes are as follows: %s. " % ', '.join(sorted(_ for _ in DBMS_DICT))
+        errMsg += "system. Supported DBMSes are as follows: %s. " % ', '.join(sorted((_ for _ in (list(DBMS_DICT) + getPublicTypeMembers(FORK, True))), key=str.lower))
         errMsg += "If you do not know the back-end DBMS, do not provide "
         errMsg += "it and sqlmap will fingerprint it for you."
         raise SqlmapUnsupportedDBMSException(errMsg)
@@ -1310,7 +1311,7 @@ def _setAuthCred():
 
 def _setHTTPAuthentication():
     """
-    Check and set the HTTP(s) authentication method (Basic, Digest, NTLM or PKI),
+    Check and set the HTTP(s) authentication method (Basic, Digest, Bearer, NTLM or PKI),
     username and password for first three methods, or PEM private key file for
     PKI authentication
     """
@@ -1333,9 +1334,9 @@ def _setHTTPAuthentication():
         errMsg += "but did not provide the type (e.g. --auth-type=\"basic\")"
         raise SqlmapSyntaxException(errMsg)
 
-    elif (conf.authType or "").lower() not in (AUTH_TYPE.BASIC, AUTH_TYPE.DIGEST, AUTH_TYPE.NTLM, AUTH_TYPE.PKI):
+    elif (conf.authType or "").lower() not in (AUTH_TYPE.BASIC, AUTH_TYPE.DIGEST, AUTH_TYPE.BEARER, AUTH_TYPE.NTLM, AUTH_TYPE.PKI):
         errMsg = "HTTP authentication type value must be "
-        errMsg += "Basic, Digest, NTLM or PKI"
+        errMsg += "Basic, Digest, Bearer, NTLM or PKI"
         raise SqlmapSyntaxException(errMsg)
 
     if not conf.authFile:
@@ -1348,6 +1349,9 @@ def _setHTTPAuthentication():
             regExp = "^(.*?):(.*?)$"
             errMsg = "HTTP %s authentication credentials " % authType
             errMsg += "value must be in format 'username:password'"
+        elif authType == AUTH_TYPE.BEARER:
+            conf.httpHeaders.append((HTTP_HEADER.AUTHORIZATION, "Bearer %s" % conf.authCred.strip()))
+            return
         elif authType == AUTH_TYPE.NTLM:
             regExp = "^(.*\\\\.*):(.*?)$"
             errMsg = "HTTP NTLM authentication credentials value must "
@@ -1997,6 +2001,7 @@ def _setKnowledgeBaseAttributes(flushAll=True):
     kb.cache = AttribDict()
     kb.cache.addrinfo = {}
     kb.cache.content = {}
+    kb.cache.comparison = {}
     kb.cache.encoding = {}
     kb.cache.alphaBoundaries = None
     kb.cache.hashRegex = None
@@ -2551,6 +2556,10 @@ def _basicOptionValidation():
 
     if conf.textOnly and conf.nullConnection:
         errMsg = "switch '--text-only' is incompatible with switch '--null-connection'"
+        raise SqlmapSyntaxException(errMsg)
+
+    if conf.base64Parameter and conf.tamper:
+        errMsg = "option '--base64' is incompatible with option '--tamper'"
         raise SqlmapSyntaxException(errMsg)
 
     if conf.eta and conf.verbose > defaults.verbose:

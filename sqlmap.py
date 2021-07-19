@@ -175,9 +175,6 @@ def main():
             elif conf.vulnTest:
                 from lib.core.testing import vulnTest
                 os._exitcode = 1 - (vulnTest() or 0)
-            elif conf.bedTest:
-                from lib.core.testing import bedTest
-                os._exitcode = 1 - (bedTest() or 0)
             elif conf.fuzzTest:
                 from lib.core.testing import fuzzTest
                 fuzzTest()
@@ -193,6 +190,8 @@ def main():
                             targets = getFileItems(conf.bulkFile)
 
                             for i in xrange(len(targets)):
+                                target = None
+
                                 try:
                                     kb.targets.clear()
                                     target = targets[i]
@@ -205,7 +204,7 @@ def main():
 
                                     crawl(target)
                                 except Exception as ex:
-                                    if not isinstance(ex, SqlmapUserQuitException):
+                                    if target and not isinstance(ex, SqlmapUserQuitException):
                                         errMsg = "problem occurred while crawling '%s' ('%s')" % (target, getSafeExString(ex))
                                         logger.error(errMsg)
                                     else:
@@ -387,6 +386,12 @@ def main():
             logger.critical(errMsg)
             raise SystemExit
 
+        elif "'WebSocket' object has no attribute 'status'" in excMsg:
+            errMsg = "wrong websocket library detected"
+            errMsg += " (Reference: 'https://github.com/sqlmapproject/sqlmap/issues/4572#issuecomment-775041086')"
+            logger.critical(errMsg)
+            raise SystemExit
+
         elif all(_ in excMsg for _ in ("window = tkinter.Tk()",)):
             errMsg = "there has been a problem in initialization of GUI interface "
             errMsg += "('%s')" % excMsg.strip().split('\n')[-1]
@@ -433,6 +438,11 @@ def main():
             errMsg = "corrupted installation detected ('%s'). " % excMsg.strip().split('\n')[-1]
             errMsg += "You should retrieve the latest development version from official GitHub "
             errMsg += "repository at '%s'" % GIT_PAGE
+            logger.critical(errMsg)
+            raise SystemExit
+
+        elif all(_ in excMsg for _ in ("No such file", "sqlmap.conf", "Test")):
+            errMsg = "you are trying to run (hidden) development tests inside the production environment"
             logger.critical(errMsg)
             raise SystemExit
 

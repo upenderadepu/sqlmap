@@ -26,6 +26,7 @@ from lib.core.common import goGoodSamaritan
 from lib.core.common import hashDBRetrieve
 from lib.core.common import hashDBWrite
 from lib.core.common import incrementCounter
+from lib.core.common import isListLike
 from lib.core.common import safeStringFormat
 from lib.core.common import singleTimeWarnMessage
 from lib.core.data import conf
@@ -217,7 +218,7 @@ def bisection(payload, expression, length=None, charsetType=None, firstChar=None
 
                 markingValue = "'%s'" % CHAR_INFERENCE_MARK
                 unescapedCharValue = unescaper.escape("'%s'" % decodeIntToUnicode(posValue))
-                forgedPayload = agent.extractPayload(payload)
+                forgedPayload = agent.extractPayload(payload) or ""
                 forgedPayload = safeStringFormat(forgedPayload.replace(INFERENCE_GREATER_CHAR, INFERENCE_EQUALS_CHAR), (expressionUnescaped, idx, posValue)).replace(markingValue, unescapedCharValue)
                 result = Request.queryPage(agent.replacePayload(payload, forgedPayload), timeBasedCompare=timeBasedCompare, raise404=False)
                 incrementCounter(getTechnique())
@@ -502,6 +503,10 @@ def bisection(payload, expression, length=None, charsetType=None, firstChar=None
                             if val is None:
                                 val = INFERENCE_UNKNOWN_CHAR
                         else:
+                            break
+
+                        # NOTE: https://github.com/sqlmapproject/sqlmap/issues/4629
+                        if not isListLike(threadData.shared.value):
                             break
 
                         with kb.locks.value:

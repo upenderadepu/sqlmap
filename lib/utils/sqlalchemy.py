@@ -35,6 +35,7 @@ from lib.core.exception import SqlmapConnectionException
 from lib.core.exception import SqlmapFilePathException
 from lib.core.exception import SqlmapMissingDependence
 from plugins.generic.connector import Connector as GenericConnector
+from thirdparty import six
 
 def getSafeExString(ex, encoding=None):  # Cross-referenced function
     raise NotImplementedError
@@ -88,7 +89,7 @@ class SQLAlchemy(GenericConnector):
 
             self.printConnected()
         else:
-            raise SqlmapMissingDependence("SQLAlchemy not available")
+            raise SqlmapMissingDependence("SQLAlchemy not available (e.g. 'pip%s install SQLAlchemy')" % ('3' if six.PY3 else ""))
 
     def fetchall(self):
         try:
@@ -101,13 +102,22 @@ class SQLAlchemy(GenericConnector):
             return None
 
     def execute(self, query):
+        retVal = False
+
         try:
             self.cursor = self.connector.execute(query)
+            retVal = True
         except (_sqlalchemy.exc.OperationalError, _sqlalchemy.exc.ProgrammingError) as ex:
             logger.log(logging.WARN if conf.dbmsHandler else logging.DEBUG, "(remote) %s" % getSafeExString(ex))
         except _sqlalchemy.exc.InternalError as ex:
             raise SqlmapConnectionException(getSafeExString(ex))
 
+        return retVal
+
     def select(self, query):
-        self.execute(query)
-        return self.fetchall()
+        retVal = None
+
+        if self.execute(query):
+            retVal = self.fetchall()
+
+        return retVal

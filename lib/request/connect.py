@@ -126,6 +126,7 @@ from lib.core.settings import UNICODE_ENCODING
 from lib.core.settings import URI_HTTP_HEADER
 from lib.core.settings import WARN_TIME_STDEV
 from lib.core.settings import WEBSOCKET_INITIAL_TIMEOUT
+from lib.core.settings import YUGE_FACTOR
 from lib.request.basic import decodePage
 from lib.request.basic import forgeHeaders
 from lib.request.basic import processResponse
@@ -251,6 +252,9 @@ class Connect(object):
                         warnMsg = "too large response detected. Automatically trimming it"
                         singleTimeWarnMessage(warnMsg)
                         break
+
+        if conf.yuge:
+            retVal = YUGE_FACTOR * retVal
 
         return retVal
 
@@ -622,7 +626,7 @@ class Connect(object):
                 if conn:
                     code = (code or conn.code) if conn.code == kb.originalCode else conn.code  # do not override redirection code (for comparison purposes)
                     responseHeaders = conn.info()
-                    responseHeaders[URI_HTTP_HEADER] = conn.geturl()
+                    responseHeaders[URI_HTTP_HEADER] = conn.geturl() if hasattr(conn, "geturl") else url
 
                     if hasattr(conn, "redurl"):
                         responseHeaders[HTTP_HEADER.LOCATION] = conn.redurl
@@ -785,7 +789,7 @@ class Connect(object):
                     debugMsg = "got HTTP error code: %d ('%s')" % (code, status)
                     logger.debug(debugMsg)
 
-        except (_urllib.error.URLError, socket.error, socket.timeout, _http_client.HTTPException, struct.error, binascii.Error, ProxyError, SqlmapCompressionException, WebSocketException, TypeError, ValueError, OverflowError):
+        except (_urllib.error.URLError, socket.error, socket.timeout, _http_client.HTTPException, struct.error, binascii.Error, ProxyError, SqlmapCompressionException, WebSocketException, TypeError, ValueError, OverflowError, AttributeError):
             tbMsg = traceback.format_exc()
 
             if conf.debug:
@@ -793,6 +797,11 @@ class Connect(object):
 
             if checking:
                 return None, None, None
+            elif "AttributeError:" in tbMsg:
+                if "WSAECONNREFUSED" in tbMsg:
+                    return None, None, None
+                else:
+                    raise
             elif "no host given" in tbMsg:
                 warnMsg = "invalid URL address used (%s)" % repr(url)
                 raise SqlmapSyntaxException(warnMsg)
@@ -1266,7 +1275,7 @@ class Connect(object):
 
             while True:
                 try:
-                    compile(getBytes(conf.evalCode.replace(';', '\n')), "", "exec")
+                    compile(getBytes(re.sub(r"\s*;\s*", "\n", conf.evalCode)), "", "exec")
                 except SyntaxError as ex:
                     if ex.text:
                         original = replacement = ex.text.strip()

@@ -16,14 +16,17 @@ from lib.core.common import Backend
 from lib.core.common import checkFile
 from lib.core.common import dataToDumpFile
 from lib.core.common import dataToStdout
+from lib.core.common import filterNone
 from lib.core.common import getSafeExString
 from lib.core.common import isListLike
 from lib.core.common import isMultiThreadMode
+from lib.core.common import isNoneValue
 from lib.core.common import normalizeUnicode
 from lib.core.common import openFile
 from lib.core.common import prioritySortColumns
 from lib.core.common import randomInt
 from lib.core.common import safeCSValue
+from lib.core.common import unArrayizeValue
 from lib.core.common import unsafeSQLIdentificatorNaming
 from lib.core.compat import xrange
 from lib.core.convert import getBytes
@@ -114,6 +117,9 @@ class Dump(object):
         if conf.api:
             self._write(data, content_type=content_type)
 
+        if isListLike(data) and len(data) == 1:
+            data = unArrayizeValue(data)
+
         if isListLike(data):
             self.lister(header, data, content_type, sort)
         elif data is not None:
@@ -200,9 +206,9 @@ class Dump(object):
             self._write("%s:" % header)
 
         for user in users:
-            settings = userSettings[user]
+            settings = filterNone(userSettings[user])
 
-            if settings is None:
+            if isNoneValue(settings):
                 stringSettings = ""
             else:
                 stringSettings = " [%d]:" % len(settings)
@@ -609,7 +615,7 @@ class Dump(object):
                                     _ = safechardecode(value, True)
                                     f.write(_)
 
-                        except magic.MagicException as ex:
+                        except Exception as ex:
                             logger.debug(getSafeExString(ex))
 
                     if conf.dumpFormat == DUMP_FORMAT.CSV:
