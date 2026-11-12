@@ -58,7 +58,7 @@ met:
     disclaimer in the documentation and/or other materials provided
     with the distribution.
 
-  * Neither the name of the the Beautiful Soup Consortium and All
+  * Neither the name of the Beautiful Soup Consortium and All
     Night Kosher Bakery nor the names of its contributors may be
     used to endorse or promote products derived from this software
     without specific prior written permission.
@@ -80,7 +80,7 @@ from __future__ import generators
 from __future__ import print_function
 
 __author__ = "Leonard Richardson (leonardr@segfault.org)"
-__version__ = "3.2.1"
+__version__ = "3.2.1b"
 __copyright__ = "Copyright (c) 2004-2012 Leonard Richardson"
 __license__ = "New-style BSD"
 
@@ -93,14 +93,16 @@ if sys.version_info >= (3, 0):
     text_type = str
     binary_type = bytes
     basestring = str
+    unichr = chr
 else:
     text_type = unicode
     binary_type = str
 
 try:
-  from htmlentitydefs import name2codepoint
+    from html.entities import name2codepoint
 except ImportError:
-  name2codepoint = {}
+    from htmlentitydefs import name2codepoint
+
 try:
     set
 except NameError:
@@ -124,7 +126,7 @@ DEFAULT_OUTPUT_ENCODING = "utf-8"
 
 def _match_css_class(str):
     """Build a RE to match the given CSS class."""
-    return re.compile(r"(^|.*\s)%s($|\s)" % str)
+    return re.compile(r"(^|.*\s)%s($|\s)" % re.escape(str))
 
 # First, the classes that represent markup elements.
 
@@ -488,7 +490,7 @@ class NavigableString(text_type, PageElement):
     def __str__(self, encoding=DEFAULT_OUTPUT_ENCODING):
         # Substitute outgoing XML entities.
         data = self.BARE_AMPERSAND_OR_BRACKET.sub(self._sub_entity, self)
-        if encoding:
+        if encoding and sys.version_info < (3, 0):
             return data.encode(encoding)
         else:
             return data

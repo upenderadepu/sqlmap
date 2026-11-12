@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -37,15 +37,16 @@ class Connector(GenericConnector):
             jar = readInput(msg)
             checkFile(jar)
             args = "-Djava.class.path=%s" % jar
-            jvm_path = jpype.getDefaultJVMPath()
-            jpype.startJVM(jvm_path, args)
+            if not jpype.isJVMStarted():
+                jvm_path = jpype.getDefaultJVMPath()
+                jpype.startJVM(jvm_path, args)
         except Exception as ex:
             raise SqlmapConnectionException(getSafeExString(ex))
 
         try:
             driver = 'com.intersys.jdbc.CacheDriver'
             connection_string = 'jdbc:Cache://%s:%d/%s' % (self.hostname, self.port, self.db)
-            self.connector = jaydebeapi.connect(driver, connection_string, str(self.user), str(self.password))
+            self.connector = jaydebeapi.connect(driver, connection_string, [str(self.user), str(self.password)])
         except Exception as ex:
             raise SqlmapConnectionException(getSafeExString(ex))
 

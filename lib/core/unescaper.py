@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 from lib.core.common import Backend
-from lib.core.datatype import AttribDict
 from lib.core.settings import EXCLUDE_UNESCAPE
 
-class Unescaper(AttribDict):
+# Note: a plain dict (DBMS -> escape function) with a helper method; it is a runtime registry, never
+# serialized, so it deliberately does NOT use AttribDict (no attribute-style access is needed here)
+class Unescaper(dict):
     def escape(self, expression, quote=True, dbms=None):
         if expression is None:
             return expression

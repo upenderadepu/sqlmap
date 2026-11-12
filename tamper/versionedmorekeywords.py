@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -47,7 +47,7 @@ def tamper(payload, **kwargs):
     retVal = payload
 
     if payload:
-        retVal = re.sub(r"(?<=\W)(?P<word>[A-Za-z_]+)(?=\W|\Z)", process, retVal)
+        retVal = re.sub(r"(?:^|(?<=\W))(?P<word>[A-Za-z_]+)(?=\W|\Z)", process, retVal)
         retVal = retVal.replace(" /*!", "/*!").replace("*/ ", "*/")
 
     return retVal

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -39,6 +39,9 @@ try:
             return matches
 except:
     readline._readline = None
+
+_atexitRegistered = False
+_activeCompletion = None
 
 def readlineAvailable():
     """
@@ -79,7 +82,7 @@ def saveHistory(completion=None):
             readline.write_history_file(historyPath)
         except IOError as ex:
             warnMsg = "there was a problem writing the history file '%s' (%s)" % (historyPath, getSafeExString(ex))
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
     except KeyboardInterrupt:
         pass
 
@@ -103,12 +106,12 @@ def loadHistory(completion=None):
             readline.read_history_file(historyPath)
         except IOError as ex:
             warnMsg = "there was a problem loading the history file '%s' (%s)" % (historyPath, getSafeExString(ex))
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
         except UnicodeError:
             if IS_WIN:
                 warnMsg = "there was a problem loading the history file '%s'. " % historyPath
                 warnMsg += "More info can be found at 'https://github.com/pyreadline/pyreadline/issues/30'"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
 def autoCompletion(completion=None, os=None, commands=None):
     if not readlineAvailable():
@@ -148,4 +151,13 @@ def autoCompletion(completion=None, os=None, commands=None):
         readline.parse_and_bind("tab: complete")
 
     loadHistory(completion)
-    atexit.register(saveHistory, completion)
+
+    # Note: readline keeps a single global in-memory history; loadHistory() above swaps it to the
+    # currently active shell. Registering a fresh atexit handler per call would make every shell
+    # write that one global buffer to its own path at exit, clobbering the others. Instead register
+    # a single handler that saves only the shell active at exit.
+    global _atexitRegistered, _activeCompletion
+    _activeCompletion = completion
+    if not _atexitRegistered:
+        atexit.register(lambda: saveHistory(_activeCompletion))
+        _atexitRegistered = True

@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
-import imp
+import importlib
 import logging
 import os
 import re
@@ -13,15 +13,18 @@ import sys
 import traceback
 import warnings
 
+_path = list(sys.path)
 _sqlalchemy = None
 try:
-    f, pathname, desc = imp.find_module("sqlalchemy", sys.path[1:])
-    _ = imp.load_module("sqlalchemy", f, pathname, desc)
-    if hasattr(_, "dialects"):
-        _sqlalchemy = _
+    sys.path = sys.path[1:]
+    module = importlib.import_module("sqlalchemy")
+    if hasattr(module, "dialects"):
+        _sqlalchemy = module
         warnings.simplefilter(action="ignore", category=_sqlalchemy.exc.SAWarning)
-except ImportError:
+except:
     pass
+finally:
+    sys.path = _path
 
 try:
     import MySQLdb  # used by SQLAlchemy in case of MySQL
@@ -36,6 +39,7 @@ from lib.core.exception import SqlmapFilePathException
 from lib.core.exception import SqlmapMissingDependence
 from plugins.generic.connector import Connector as GenericConnector
 from thirdparty import six
+from thirdparty.six.moves import urllib as _urllib
 
 def getSafeExString(ex, encoding=None):  # Cross-referenced function
     raise NotImplementedError
@@ -46,6 +50,15 @@ class SQLAlchemy(GenericConnector):
 
         self.dialect = dialect
         self.address = conf.direct
+        self.engine = None
+
+        if conf.dbmsUser:
+            self.address = self.address.replace("'%s':" % conf.dbmsUser, "%s:" % _urllib.parse.quote(conf.dbmsUser))
+            self.address = self.address.replace("%s:" % conf.dbmsUser, "%s:" % _urllib.parse.quote(conf.dbmsUser))
+
+        if conf.dbmsPass:
+            self.address = self.address.replace(":'%s'@" % conf.dbmsPass, ":%s@" % _urllib.parse.quote(conf.dbmsPass))
+            self.address = self.address.replace(":%s@" % conf.dbmsPass, ":%s@" % _urllib.parse.quote(conf.dbmsPass))
 
         if self.dialect:
             self.address = re.sub(r"\A.+://", "%s://" % self.dialect, self.address)
@@ -60,7 +73,10 @@ class SQLAlchemy(GenericConnector):
                         raise SqlmapFilePathException("the provided database file '%s' does not exist" % self.db)
 
                     _ = self.address.split("//", 1)
-                    self.address = "%s////%s" % (_[0], os.path.abspath(self.db))
+                    # Note: SQLAlchemy's absolute-SQLite form is 'sqlite:///' + abspath (the abspath's own
+                    # leading '/' completes the triple slash on POSIX). A 4th slash yields db '//path' (only
+                    # tolerated on Linux by accident) and, on Windows, '/C:\...' which fails to open.
+                    self.address = "%s///%s" % (_[0], os.path.abspath(self.db))
 
                 if self.dialect == "sqlite":
                     engine = _sqlalchemy.create_engine(self.address, connect_args={"check_same_thread": False})
@@ -69,8 +85,9 @@ class SQLAlchemy(GenericConnector):
                 else:
                     engine = _sqlalchemy.create_engine(self.address, connect_args={})
 
+                self.engine = engine
                 self.connector = engine.connect()
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as ex:
                 if "_get_server_version_info" in traceback.format_exc():
                     try:
                         import pymssql
@@ -78,10 +95,14 @@ class SQLAlchemy(GenericConnector):
                             raise SqlmapConnectionException("SQLAlchemy connection issue (obsolete version of pymssql ('%s') is causing problems)" % pymssql.__version__)
                     except ImportError:
                         pass
+                    # Note: surface (as a proper SqlmapConnectionException) instead of silently continuing with self.connector left None
+                    raise SqlmapConnectionException("SQLAlchemy connection issue ('%s')" % getSafeExString(ex))
                 elif "invalid literal for int() with base 10: '0b" in traceback.format_exc():
                     raise SqlmapConnectionException("SQLAlchemy connection issue ('https://bitbucket.org/zzzeek/sqlalchemy/issues/3975')")
                 else:
-                    pass
+                    # Note: raise as SqlmapConnectionException (like the generic handler below) so the caller's native-connector
+                    # fallback engages and no raw TypeError/ValueError can reach sqlmap's top-level handler
+                    raise SqlmapConnectionException("SQLAlchemy connection issue ('%s')" % getSafeExString(ex))
             except SqlmapFilePathException:
                 raise
             except Exception as ex:
@@ -90,6 +111,19 @@ class SQLAlchemy(GenericConnector):
             self.printConnected()
         else:
             raise SqlmapMissingDependence("SQLAlchemy not available (e.g. 'pip%s install SQLAlchemy')" % ('3' if six.PY3 else ""))
+
+    def close(self):
+        try:
+            GenericConnector.close(self)
+        finally:
+            # Note: closing the connection only returns it to the engine's pool (the underlying DBAPI
+            # connection, e.g. sqlite3, stays open) - disposing the engine is what actually releases it
+            if self.engine is not None:
+                try:
+                    self.engine.dispose()
+                except Exception as ex:
+                    logger.debug(getSafeExString(ex))
+                self.engine = None
 
     def fetchall(self):
         try:
@@ -101,14 +135,33 @@ class SQLAlchemy(GenericConnector):
             logger.log(logging.WARN if conf.dbmsHandler else logging.DEBUG, "(remote) %s" % getSafeExString(ex))
             return None
 
-    def execute(self, query):
+    def execute(self, query, commit=True):
         retVal = False
+
+        # Reference: https://stackoverflow.com/a/69491015
+        if hasattr(_sqlalchemy, "text"):
+            query = _sqlalchemy.text(query)
 
         try:
             self.cursor = self.connector.execute(query)
+            # Note: SQLAlchemy 2.0+ dropped implicit autocommit (otherwise DML changes - e.g. via --sql-query -
+            # would be silently lost). SELECT goes through select() with commit=False so the result set is
+            # fetched BEFORE committing: on some drivers (e.g. pymssql) commit() discards the open cursor, which
+            # otherwise made every MSSQL '-d' query silently return empty (banner/is-dba/dump all blank).
+            if commit and hasattr(self.connector, "commit"):
+                self.connector.commit()
             retVal = True
-        except (_sqlalchemy.exc.OperationalError, _sqlalchemy.exc.ProgrammingError) as ex:
+        except (_sqlalchemy.exc.OperationalError, _sqlalchemy.exc.ProgrammingError, _sqlalchemy.exc.DataError, _sqlalchemy.exc.IntegrityError) as ex:
             logger.log(logging.WARN if conf.dbmsHandler else logging.DEBUG, "(remote) %s" % getSafeExString(ex))
+            # Roll back the failed statement's transaction so it does not poison every following query with
+            # 'InFailedSqlTransaction' (SQLAlchemy 2.0+ keeps the transaction open after an error). Without this
+            # a single legitimately-failing probe - e.g. AURORA_VERSION() on vanilla PostgreSQL during
+            # fingerprinting - made all later queries silently return wrong values (e.g. '--is-dba' read False)
+            if hasattr(self.connector, "rollback"):
+                try:
+                    self.connector.rollback()
+                except Exception:
+                    pass
         except _sqlalchemy.exc.InternalError as ex:
             raise SqlmapConnectionException(getSafeExString(ex))
 
@@ -117,7 +170,14 @@ class SQLAlchemy(GenericConnector):
     def select(self, query):
         retVal = None
 
-        if self.execute(query):
+        # Fetch BEFORE committing (commit=False): committing can discard the open result cursor on some drivers
+        # (e.g. pymssql), which silently emptied every MSSQL '-d' result. No DML is persisted by a SELECT anyway.
+        if self.execute(query, commit=False):
             retVal = self.fetchall()
+            if hasattr(self.connector, "commit"):
+                try:
+                    self.connector.commit()
+                except Exception:
+                    pass
 
         return retVal

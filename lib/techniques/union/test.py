@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -38,6 +38,7 @@ from lib.core.enums import FUZZ_UNION_COLUMN
 from lib.core.enums import PAYLOAD
 from lib.core.settings import FUZZ_UNION_ERROR_REGEX
 from lib.core.settings import FUZZ_UNION_MAX_COLUMNS
+from lib.core.settings import FUZZ_UNION_MAX_REQUESTS
 from lib.core.settings import LIMITED_ROWS_TEST_NUMBER
 from lib.core.settings import MAX_RATIO
 from lib.core.settings import MIN_RATIO
@@ -60,14 +61,37 @@ def _findUnionCharCount(comment, place, parameter, value, prefix, suffix, where=
 
     @stackedmethod
     def _orderByTechnique(lowerCount=None, upperCount=None):
-        def _orderByTest(cols):
+        def _orderByProbe(cols):
             query = agent.prefixQuery("ORDER BY %d" % cols, prefix=prefix)
             query = agent.suffixQuery(query, suffix=suffix, comment=comment)
             payload = agent.payload(newValue=query, place=place, parameter=parameter, where=where)
             page, headers, code = Request.queryPage(payload, place=place, content=True, raise404=False)
-            return not any(re.search(_, page or "", re.I) and not re.search(_, kb.pageTemplate or "", re.I) for _ in ("(warning|error):", "order (by|clause)", "unknown column", "failed")) and not kb.heavilyDynamic and comparison(page, headers, code) or re.search(r"data types cannot be compared or sorted", page or "", re.I) is not None
+            errored = any(re.search(_, page or "", re.I) and not re.search(_, kb.pageTemplate or "", re.I) for _ in ("(warning|error):", "order (by|clause)", "unknown column", "failed"))
+            return page, headers, code, errored
 
-        if _orderByTest(1 if lowerCount is None else lowerCount) and not _orderByTest(randomInt() if upperCount is None else upperCount + 1):
+        lowCount = 1 if lowerCount is None else lowerCount
+        highCount = randomInt() if upperCount is None else upperCount + 1
+
+        lowPage, lowHeaders, lowCode, lowErrored = _orderByProbe(lowCount)
+        highPage, highHeaders, highCode, highErrored = _orderByProbe(highCount)
+
+        # When an out-of-range ORDER BY position visibly errors on this target, the column count can be
+        # bisected on error presence alone - immune to result-set shifts caused by the injection context
+        # (e.g. a LIKE '%...%' search whose matches change once the string literal is closed), which would
+        # otherwise make the response-similarity oracle reject a still-valid position.
+        errorOracle = highErrored and not lowErrored
+
+        def _orderByValid(page, headers, code, errored):
+            if re.search(r"data types cannot be compared or sorted", page or "", re.I):
+                return True
+            if errored:
+                return False
+            return errorOracle or (not kb.heavilyDynamic and comparison(page, headers, code))
+
+        def _orderByTest(cols):
+            return _orderByValid(*_orderByProbe(cols))
+
+        if _orderByValid(lowPage, lowHeaders, lowCode, lowErrored) and not _orderByValid(highPage, highHeaders, highCode, highErrored):
             infoMsg = "'ORDER BY' technique appears to be usable. "
             infoMsg += "This should reduce the time needed "
             infoMsg += "to find the right number "
@@ -133,7 +157,8 @@ def _findUnionCharCount(comment, place, parameter, value, prefix, suffix, where=
             items.append((count, ratio))
 
         if not isNullValue(kb.uChar):
-            for regex in (kb.uChar.strip("'"), r'>\s*%s\s*<' % kb.uChar.strip("'")):
+            value = re.escape(kb.uChar.strip("'"))
+            for regex in (value, r'>\s*%s\s*<' % value):
                 contains = [count for count, content in pages.items() if re.search(regex, content or "", re.IGNORECASE) is not None]
                 if len(contains) == 1:
                     retVal = contains[0]
@@ -189,12 +214,14 @@ def _fuzzUnionCols(place, parameter, prefix, suffix):
         choices = getPublicTypeMembers(FUZZ_UNION_COLUMN, True)
         random.shuffle(choices)
 
+        attempts = 0
         for candidate in itertools.product(choices, repeat=kb.orderByColumns):
-            if retVal:
+            if retVal or attempts >= FUZZ_UNION_MAX_REQUESTS:  # bound the exponential type-combination search
                 break
             elif FUZZ_UNION_COLUMN.STRING not in candidate:
                 continue
             else:
+                attempts += 1
                 candidate = [_.replace(FUZZ_UNION_COLUMN.INTEGER, str(randomInt())).replace(FUZZ_UNION_COLUMN.STRING, "'%s'" % randomStr(20)) for _ in candidate]
 
             query = agent.prefixQuery("UNION ALL SELECT %s%s" % (','.join(candidate), FROM_DUMMY_TABLE.get(Backend.getIdentifiedDbms(), "")), prefix=prefix)
@@ -234,7 +261,7 @@ def _unionPosition(comment, place, parameter, prefix, suffix, count, where=PAYLO
             randQueryUnescaped = unescaper.escape(randQueryProcessed)
 
             # Forge the union SQL injection request
-            query = agent.forgeUnionQuery(randQueryUnescaped, position, count, comment, prefix, suffix, kb.uChar, where)
+            query = agent.forgeUnionQuery(randQueryUnescaped, position, count, comment, prefix, suffix, kb.uChar, where, collate=True)
             payload = agent.payload(place=place, parameter=parameter, newValue=query, where=where)
 
             # Perform the request
@@ -254,7 +281,7 @@ def _unionPosition(comment, place, parameter, prefix, suffix, count, where=PAYLO
                     randQueryUnescaped2 = unescaper.escape(randQueryProcessed2)
 
                     # Confirm that it is a full union SQL injection
-                    query = agent.forgeUnionQuery(randQueryUnescaped, position, count, comment, prefix, suffix, kb.uChar, where, multipleUnions=randQueryUnescaped2)
+                    query = agent.forgeUnionQuery(randQueryUnescaped, position, count, comment, prefix, suffix, kb.uChar, where, multipleUnions=randQueryUnescaped2, collate=True)
                     payload = agent.payload(place=place, parameter=parameter, newValue=query, where=where)
 
                     # Perform the request
@@ -267,7 +294,7 @@ def _unionPosition(comment, place, parameter, prefix, suffix, count, where=PAYLO
                         fromTable = " FROM (%s) AS %s" % (" UNION ".join("SELECT %d%s%s" % (_, FROM_DUMMY_TABLE.get(Backend.getIdentifiedDbms(), ""), " AS %s" % randomStr() if _ == 0 else "") for _ in xrange(LIMITED_ROWS_TEST_NUMBER)), randomStr())
 
                         # Check for limited row output
-                        query = agent.forgeUnionQuery(randQueryUnescaped, position, count, comment, prefix, suffix, kb.uChar, where, fromTable=fromTable)
+                        query = agent.forgeUnionQuery(randQueryUnescaped, position, count, comment, prefix, suffix, kb.uChar, where, fromTable=fromTable, collate=True)
                         payload = agent.payload(place=place, parameter=parameter, newValue=query, where=where)
 
                         # Perform the request
@@ -275,7 +302,7 @@ def _unionPosition(comment, place, parameter, prefix, suffix, count, where=PAYLO
                         content = ("%s%s" % (removeReflectiveValues(page, payload) or "", removeReflectiveValues(listToStrValue(headers.headers if headers else None), payload, True) or "")).lower()
                         if content.count(phrase) > 0 and content.count(phrase) < LIMITED_ROWS_TEST_NUMBER:
                             warnMsg = "output with limited number of rows detected. Switching to partial mode"
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
                             vector = (position, count, comment, prefix, suffix, kb.uChar, where, kb.unionDuplicates, True, kb.tableFrom, kb.unionTemplate)
 
                 unionErrorCase = kb.errorIsNone and wasLastResponseDBMSError()
@@ -284,7 +311,7 @@ def _unionPosition(comment, place, parameter, prefix, suffix, count, where=PAYLO
                     warnMsg = "combined UNION/error-based SQL injection case found on "
                     warnMsg += "column %d. sqlmap will try to find another " % (position + 1)
                     warnMsg += "column with better characteristics"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
                 else:
                     break
 
@@ -331,16 +358,21 @@ def _unionTestByCharBruteforce(comment, place, parameter, value, prefix, suffix)
             if Backend.getIdentifiedDbms() and kb.orderByColumns and kb.orderByColumns < FUZZ_UNION_MAX_COLUMNS:
                 if kb.fuzzUnionTest is None:
                     msg = "do you want to (re)try to find proper "
-                    msg += "UNION column types with fuzzy test? [y/N] "
+                    msg += "UNION column types with a fuzzy test? [Y/n] "
 
-                    kb.fuzzUnionTest = readInput(msg, default='N', boolean=True)
+                    kb.fuzzUnionTest = readInput(msg, default='Y', boolean=True)
                     if kb.fuzzUnionTest:
                         kb.unionTemplate = _fuzzUnionCols(place, parameter, prefix, suffix)
+
+                        # apply the discovered per-column type template through a normal confirmation so
+                        # the resulting vector (and later extraction) is built with type-compatible columns
+                        if kb.unionTemplate:
+                            validPayload, vector = _unionConfirm(comment, place, parameter, prefix, suffix, len(kb.unionTemplate))
 
             warnMsg = "if UNION based SQL injection is not detected, "
             warnMsg += "please consider "
 
-            if not conf.uChar and count > 1 and kb.uChar == NULL:
+            if not all((validPayload, vector)) and not conf.uChar and count > 1 and kb.uChar == NULL and conf.uValues is None:
                 message = "injection not exploitable with NULL values. Do you want to try with a random integer value for option '--union-char'? [Y/n] "
 
                 if not readInput(message, default='Y', boolean=True):
@@ -378,6 +410,8 @@ def unionTest(comment, place, parameter, value, prefix, suffix):
 
     negativeLogic = kb.negativeLogic
     setTechnique(PAYLOAD.TECHNIQUE.UNION)
+
+    kb.unionTemplate = None  # reset any per-column type template carried over from a previous parameter
 
     try:
         if negativeLogic:

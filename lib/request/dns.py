@@ -1,19 +1,26 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 from __future__ import print_function
 
 import binascii
+import collections
+import errno
 import os
 import re
 import socket
 import struct
 import threading
 import time
+
+try:
+    from lib.core.settings import MAX_DNS_REQUESTS
+except ImportError:
+    MAX_DNS_REQUESTS = 1000     # fallback so this module stays runnable standalone
 
 class DNSQuery(object):
     """
@@ -28,18 +35,36 @@ class DNSQuery(object):
         self._query = b""
 
         try:
+            if len(raw) < 13:
+                return
+
             type_ = (ord(raw[2:3]) >> 3) & 15                   # Opcode bits
 
             if type_ == 0:                                      # Standard query
                 i = 12
-                j = ord(raw[i:i + 1])
+                labels = []
 
-                while j != 0:
-                    self._query += raw[i + 1:i + j + 1] + b'.'
-                    i = i + j + 1
+                while True:
+                    if i >= len(raw):
+                        return
+
                     j = ord(raw[i:i + 1])
-        except TypeError:
-            pass
+
+                    if j == 0:
+                        break
+
+                    i += 1
+
+                    if i + j > len(raw):
+                        return
+
+                    labels.append(raw[i:i + j])
+                    i += j
+
+                if labels:
+                    self._query = b".".join(labels) + b'.'
+        except (TypeError, ValueError, IndexError):
+            self._query = b""
 
     def response(self, resolution):
         """
@@ -49,10 +74,15 @@ class DNSQuery(object):
         retVal = b""
 
         if self._query:
+            end = self._raw[12:].find(b"\x00")
+
+            if end < 0 or len(self._raw) < 12 + end + 5:
+                return retVal
+
             retVal += self._raw[:2]                                                         # Transaction ID
             retVal += b"\x85\x80"                                                           # Flags (Standard query response, No error)
             retVal += self._raw[4:6] + self._raw[4:6] + b"\x00\x00\x00\x00"                 # Questions and Answers Counts
-            retVal += self._raw[12:(12 + self._raw[12:].find(b"\x00") + 5)]                 # Original Domain Name Query
+            retVal += self._raw[12:(12 + end + 5)]                                          # Original Domain Name Query
             retVal += b"\xc0\x0c"                                                           # Pointer to domain name
             retVal += b"\x00\x01"                                                           # Type A
             retVal += b"\x00\x01"                                                           # Class IN
@@ -74,7 +104,7 @@ class DNSServer(object):
 
     def __init__(self):
         self._check_localhost()
-        self._requests = []
+        self._requests = collections.deque(maxlen=MAX_DNS_REQUESTS)
         self._lock = threading.Lock()
 
         try:
@@ -89,17 +119,22 @@ class DNSServer(object):
 
     def _check_localhost(self):
         response = b""
+        s = None
 
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1.0)
             s.connect(("", 53))
             s.send(binascii.unhexlify("6509012000010000000000010377777706676f6f676c6503636f6d00000100010000291000000000000000"))  # A www.google.com
             response = s.recv(512)
         except:
             pass
         finally:
-            if response and b"google" in response:
-                raise socket.error("another DNS service already running on '0.0.0.0:53'")
+            if s:
+                s.close()
+
+        if response and b"google" in response:
+            raise socket.error("another DNS service already running on '0.0.0.0:53'")
 
     def pop(self, prefix=None, suffix=None):
         """
@@ -117,7 +152,7 @@ class DNSServer(object):
 
         with self._lock:
             for _ in self._requests:
-                if prefix is None and suffix is None or re.search(b"%s\\..+\\.%s" % (prefix, suffix), _, re.I):
+                if prefix is None and suffix is None or re.search(b"%s\\..+\\.%s" % (re.escape(prefix), re.escape(suffix)), _, re.I):
                     self._requests.remove(_)
                     retVal = _.decode()
                     break
@@ -130,17 +165,55 @@ class DNSServer(object):
         """
 
         def _():
+            def _is_udp_connreset(ex):
+                return getattr(ex, "winerror", None) == 10054 or getattr(ex, "errno", None) in (errno.ECONNRESET, 10054)
+
             try:
                 self._running = True
                 self._initialized = True
 
-                while True:
-                    data, addr = self._socket.recvfrom(1024)
-                    _ = DNSQuery(data)
-                    self._socket.sendto(_.response("127.0.0.1"), addr)
+                try:
+                    if hasattr(socket, "SIO_UDP_CONNRESET") and hasattr(self._socket, "ioctl"):
+                        # Windows reports ICMP "port unreachable" for UDP as WSAECONNRESET on
+                        # recvfrom(). DNS clients in tests and in the wild can disappear before
+                        # reading our fake response; that must not kill the server thread.
+                        self._socket.ioctl(socket.SIO_UDP_CONNRESET, False)
+                except Exception:
+                    pass
 
-                    with self._lock:
-                        self._requests.append(_._query)
+                while True:
+                    try:
+                        data, addr = self._socket.recvfrom(1024)
+                    except KeyboardInterrupt:
+                        raise
+                    except socket.error as ex:
+                        if _is_udp_connreset(ex):
+                            continue
+                        break       # socket closed/broken - stop serving (e.g. program exit)
+                    except Exception:
+                        break       # socket closed/broken - stop serving (e.g. program exit)
+
+                    # Note: a single malformed packet or a transient send error must NOT kill the
+                    # server thread (otherwise all subsequent DNS exfiltration is silently lost).
+                    # The query is recorded BEFORE responding, so the exfiltrated data is captured
+                    # even if crafting/sending the (fake) resolution response fails.
+                    try:
+                        _ = DNSQuery(data)
+
+                        if not _._query:
+                            continue
+
+                        with self._lock:
+                            self._requests.append(_._query)
+
+                        response = _.response("127.0.0.1")
+
+                        if response:
+                            self._socket.sendto(response, addr)
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
+                        pass
 
             except KeyboardInterrupt:
                 raise
@@ -151,6 +224,101 @@ class DNSServer(object):
         thread = threading.Thread(target=_)
         thread.daemon = True
         thread.start()
+
+class InteractshDNSServer(object):
+    """DNS exfiltration collector backed by a public (or self-hosted) interactsh
+    interaction server instead of a locally-bound privileged :53 socket. This lets
+    the '--dns-domain' data-exfiltration technique run with zero infrastructure - no
+    delegated authoritative domain, no root/Administrator, no reachable listener -
+    by resolving lookups under the interactsh correlation domain and polling them
+    back. It presents the same run()/pop(prefix, suffix) surface as DNSServer, so it
+    is a drop-in for conf.dnsServer.
+    """
+
+    # Default time budget (seconds) pop() spends waiting on the poller queue for a
+    # not-yet-arriving captured lookup. Overridable per instance for fast tests.
+    _POP_DEADLINE = 6
+
+    def __init__(self, server=None):
+        from lib.request.interactsh import Interactsh, hasCrypto
+
+        if not hasCrypto():
+            raise socket.error("interactsh-backed DNS exfiltration requires the optional 'pycryptodome' package")
+
+        self._client = Interactsh(server=server)
+
+        if not self._client.registered:
+            raise socket.error("could not register with an interactsh interaction server")
+
+        # One background poller drains the remote session; pop() consumes from its in-memory
+        # queue with zero network calls.
+        self._client._ensurePoller()
+        self.domain = self._client.dnsDomain()
+        self._seen = set()
+        self._running = True
+        self._initialized = True
+
+    def stop(self):
+        """Best-effort shutdown: stop the single background poller (join it) then deregister.
+
+        stop() also deregisters, and the poller is the only code that drains the remote
+        session, so it must be stopped before deregistering."""
+        self._running = False
+        client = getattr(self, "_client", None)
+        if client is not None:
+            client.stop()
+
+    def run(self):
+        """No background listener is needed - interactsh does the receiving."""
+        pass
+
+    def _matchesDns(self, record, prefix, suffix):
+        # Protocol gate: the shared poller queues dns/http/https together, so a record can land in
+        # the queue for another consumer. Never hand an HTTP record to the DNS channel - doing so
+        # would make pop() return a request line as though it were a DNS lookup, and the HTTP
+        # consumer would then lose that interaction (the exact cross-consumer loss the shared queue
+        # was introduced to prevent).
+        if record.get("protocol") != "dns":
+            return False
+        name = record.get("full-id")
+        if not name:
+            return False
+        if name in self._seen:       # already handed out once, never return it again
+            return False
+        if prefix is None and suffix is None:
+            return True
+        if prefix and suffix and re.search(
+                r"%s\..+\.%s" % (re.escape(prefix), re.escape(suffix)), name, re.I):
+            return True
+        return False
+
+    def pop(self, prefix=None, suffix=None, deadline=None, sync=False):
+        """
+        Returns a captured DNS lookup name matching the given prefix/suffix
+        (prefix.<query result>.suffix.<correlation domain>), mirroring DNSServer.pop().
+
+        Unlike the synchronous local DNSServer (which reads a query captured during the
+        very request), interactsh is remote and eventually-consistent: a just-triggered
+        lookup takes a moment to reach the collector and surface via its poll API. The
+        background poller stages matching names in a queue, so pop() waits on that queue
+        (no network call) until the ~6s deadline, then returns None.
+
+        ``deadline`` is the number of seconds to wait for a not-yet-arriving lookup
+        (``deadline=0`` is a snapshot of the current queue with no wait); ``None`` selects the
+        class default (``_POP_DEADLINE``). This None semantics differs from ``_consume``, where
+        ``None`` means "don't wait" - here it means "wait the default". It is resolved here to
+        an absolute timestamp for the poller's Condition. ``sync`` forces the direct-poll
+        fallback path.
+        """
+        selector = lambda record: self._matchesDns(record, prefix, suffix)
+        # deadline=None -> use the class default budget; a number -> that many seconds.
+        budget = self._POP_DEADLINE if deadline is None else deadline
+        matched = self._client._consume(selector, deadline=time.time() + budget, sync=sync)
+        if matched:
+            matched_id = matched[0].get("full-id")
+            self._seen.add(matched_id)
+            return matched_id
+        return None
 
 if __name__ == "__main__":
     server = None

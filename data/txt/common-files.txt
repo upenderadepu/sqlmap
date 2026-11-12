@@ -1,4 +1,4 @@
-# Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+# Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 # See the file 'LICENSE' for copying permission
 
 # CTFs
@@ -1807,3 +1807,113 @@
 /opt/kibana/config/kibana.yml
 /etc/kibana/kibana.yml
 /etc/elasticsearch/elasticsearch.yml
+
+# Containers and orchestration secrets
+
+/.dockerenv
+/proc/self/cgroup
+/proc/1/cgroup
+/run/secrets/kubernetes.io/serviceaccount/token
+/var/run/secrets/kubernetes.io/serviceaccount/token
+/run/secrets/kubernetes.io/serviceaccount/namespace
+/var/run/secrets/kubernetes.io/serviceaccount/namespace
+/run/secrets/kubernetes.io/serviceaccount/ca.crt
+/etc/kubernetes/admin.conf
+/etc/kubernetes/kubelet.conf
+
+# Cloud provider credentials
+
+/root/.aws/credentials
+/root/.aws/config
+/root/.config/gcloud/application_default_credentials.json
+/root/.config/gcloud/credentials.db
+/root/.config/gcloud/access_tokens.db
+/root/.azure/accessTokens.json
+/root/.azure/credentials
+/root/.kube/config
+
+# SSH keys and DB/tool history
+
+/root/.ssh/authorized_keys
+/root/.ssh/id_ed25519
+/root/.ssh/id_ecdsa
+/root/.ssh/id_dsa
+/root/.ssh/config
+/etc/ssh/ssh_host_rsa_key
+/etc/ssh/ssh_host_ed25519_key
+/etc/ssh/ssh_host_ecdsa_key
+/root/.mysql_history
+/root/.psql_history
+/root/.rediscli_history
+/root/.python_history
+/root/.sqlite_history
+
+# dotenv, VCS and app config under common web roots
+
+/var/www/.env
+/var/www/html/.env
+/app/.env
+/usr/share/nginx/html/.env
+/var/www/html/.git/config
+/var/www/html/.git/HEAD
+/var/www/html/wp-config.php
+/app/application.properties
+/app/application.yml
+/app/docker-compose.yml
+
+# Developer, package manager and DBMS credential files
+
+/root/.env
+/root/.netrc
+/root/.git-credentials
+/root/.npmrc
+/root/.pypirc
+/root/.docker/config.json
+/root/.config/gh/hosts.yml
+/root/.config/op/config
+/root/.my.cnf
+/etc/mysql/debian.cnf
+
+# Hosting control panels
+
+/etc/psa/.psa.shadow
+/etc/psa/private/secret_key
+
+# AI agent credentials
+
+/root/.claude/.credentials.json
+/root/.claude.json
+/root/.codex/auth.json
+/root/.config/anthropic/config.json
+
+# Secrets in the default user's home on common cloud images
+
+/home/ubuntu/.ssh/id_rsa
+/home/ubuntu/.aws/credentials
+/home/ubuntu/.kube/config
+/home/ubuntu/.git-credentials
+/home/ubuntu/.claude/.credentials.json
+/home/debian/.ssh/id_rsa
+/home/debian/.aws/credentials
+/home/debian/.kube/config
+/home/debian/.git-credentials
+/home/admin/.ssh/id_rsa
+/home/admin/.aws/credentials
+/home/admin/.kube/config
+/home/admin/.git-credentials
+/home/ec2-user/.ssh/id_rsa
+/home/ec2-user/.aws/credentials
+/home/ec2-user/.kube/config
+/home/ec2-user/.git-credentials
+/home/centos/.ssh/id_rsa
+/home/centos/.aws/credentials
+/home/centos/.kube/config
+/home/opc/.ssh/id_rsa
+/home/opc/.aws/credentials
+/home/opc/.kube/config
+
+# Appliance and LFI-to-RCE gadget targets
+
+/dev/cmdb/sslvpn_websession
+/usr/share/php/pearcmd.php
+/usr/local/lib/php/pearcmd.php

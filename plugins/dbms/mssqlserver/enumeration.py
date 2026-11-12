@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -39,7 +39,7 @@ class Enumeration(GenericEnumeration):
         warnMsg = "on Microsoft SQL Server it is not possible to fetch "
         warnMsg += "database users privileges, sqlmap will check whether "
         warnMsg += "or not the database users are database administrators"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         users = []
         areAdmins = set()
@@ -93,7 +93,7 @@ class Enumeration(GenericEnumeration):
 
         if any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct:
             for db in dbs:
-                if conf.excludeSysDbs and db in self.excludeDbsList:
+                if conf.excludeSysDbs and unsafeSQLIdentificatorNaming(db) in self.excludeDbsList:
                     infoMsg = "skipping system database '%s'" % db
                     singleTimeLogMessage(infoMsg)
                     continue
@@ -116,7 +116,7 @@ class Enumeration(GenericEnumeration):
 
         if not kb.data.cachedTables and isInferenceAvailable() and not conf.direct:
             for db in dbs:
-                if conf.excludeSysDbs and db in self.excludeDbsList:
+                if conf.excludeSysDbs and unsafeSQLIdentificatorNaming(db) in self.excludeDbsList:
                     infoMsg = "skipping system database '%s'" % db
                     singleTimeLogMessage(infoMsg)
                     continue
@@ -140,7 +140,7 @@ class Enumeration(GenericEnumeration):
                     if count != 0:
                         warnMsg = "unable to retrieve the number of "
                         warnMsg += "tables for database '%s'" % db
-                        logger.warn(warnMsg)
+                        logger.warning(warnMsg)
                     continue
 
                 tables = []
@@ -159,7 +159,7 @@ class Enumeration(GenericEnumeration):
                 else:
                     warnMsg = "unable to retrieve the tables "
                     warnMsg += "for database '%s'" % db
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
         if not kb.data.cachedTables and not conf.search:
             errMsg = "unable to retrieve the tables for any database"
@@ -206,7 +206,7 @@ class Enumeration(GenericEnumeration):
             for db in foundTbls.keys():
                 db = safeSQLIdentificatorNaming(db)
 
-                if conf.excludeSysDbs and db in self.excludeDbsList:
+                if conf.excludeSysDbs and unsafeSQLIdentificatorNaming(db) in self.excludeDbsList:
                     infoMsg = "skipping system database '%s'" % db
                     singleTimeLogMessage(infoMsg)
                     continue
@@ -248,7 +248,7 @@ class Enumeration(GenericEnumeration):
                             warnMsg += "s LIKE"
                         warnMsg += " '%s' " % unsafeSQLIdentificatorNaming(tbl)
                         warnMsg += "in database '%s'" % unsafeSQLIdentificatorNaming(db)
-                        logger.warn(warnMsg)
+                        logger.warning(warnMsg)
 
                         continue
 
@@ -269,7 +269,7 @@ class Enumeration(GenericEnumeration):
 
         if not foundTbls:
             warnMsg = "no databases contain any of the provided tables"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
             return
 
         conf.dumper.dbTables(foundTbls)
@@ -343,7 +343,7 @@ class Enumeration(GenericEnumeration):
             for db in (_ for _ in dbs if _):
                 db = safeSQLIdentificatorNaming(db)
 
-                if conf.excludeSysDbs and db in self.excludeDbsList:
+                if conf.excludeSysDbs and unsafeSQLIdentificatorNaming(db) in self.excludeDbsList:
                     continue
 
                 if conf.exclude and re.search(conf.exclude, db, re.I) is not None:
@@ -407,7 +407,7 @@ class Enumeration(GenericEnumeration):
                             warnMsg += "s LIKE"
                         warnMsg += " '%s' " % column
                         warnMsg += "in database '%s'" % db
-                        logger.warn(warnMsg)
+                        logger.warning(warnMsg)
 
                         continue
 

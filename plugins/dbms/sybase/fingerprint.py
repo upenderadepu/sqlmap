@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -86,7 +86,7 @@ class Fingerprint(GenericFingerprint):
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.SYBASE
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return False
 
@@ -106,7 +106,8 @@ class Fingerprint(GenericFingerprint):
                 Backend.setVersion(str(result))
             else:
                 for version in xrange(12, 16):
-                    result = inject.checkBooleanExpression("PATINDEX('%%/%d[./]%%',@@VERSION)>0" % version)
+                    # Note: plain LIKE matches the same two shapes, without the bracket class that WAF/IPS score (e.g. OWASP CRS rule 932130)
+                    result = inject.checkBooleanExpression("(@@VERSION LIKE '%%/%d.%%' OR @@VERSION LIKE '%%/%d/%%')" % (version, version))
 
                     if result:
                         Backend.setVersion(str(version))
@@ -115,6 +116,6 @@ class Fingerprint(GenericFingerprint):
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.SYBASE
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False

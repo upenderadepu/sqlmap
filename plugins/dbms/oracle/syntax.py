@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -15,6 +15,8 @@ class Syntax(GenericSyntax):
         >>> Syntax.escape("SELECT 'abcdefgh' FROM foobar") == "SELECT CHR(97)||CHR(98)||CHR(99)||CHR(100)||CHR(101)||CHR(102)||CHR(103)||CHR(104) FROM foobar"
         True
         >>> Syntax.escape(u"SELECT 'abcd\xebfgh' FROM foobar") == "SELECT CHR(97)||CHR(98)||CHR(99)||CHR(100)||NCHR(235)||CHR(102)||CHR(103)||CHR(104) FROM foobar"
+        True
+        >>> Syntax.escape("SELECT 'a''b' FROM DUAL") == "SELECT CHR(97)||CHR(39)||CHR(98) FROM DUAL"
         True
         """
 

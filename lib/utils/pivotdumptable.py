@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -14,10 +14,12 @@ from lib.core.common import filterNone
 from lib.core.common import getSafeExString
 from lib.core.common import isNoneValue
 from lib.core.common import isNumPosStrValue
+from lib.core.common import prioritySortColumns
 from lib.core.common import singleTimeWarnMessage
 from lib.core.common import unArrayizeValue
 from lib.core.common import unsafeSQLIdentificatorNaming
 from lib.core.compat import xrange
+from lib.core.convert import getConsoleLength
 from lib.core.convert import getUnicode
 from lib.core.data import conf
 from lib.core.data import kb
@@ -28,7 +30,6 @@ from lib.core.enums import CHARSET_TYPE
 from lib.core.enums import EXPECTED
 from lib.core.exception import SqlmapConnectionException
 from lib.core.exception import SqlmapNoneDataException
-from lib.core.settings import MAX_INT
 from lib.core.settings import NULL
 from lib.core.settings import SINGLE_QUOTE_MARKER
 from lib.core.unescaper import unescaper
@@ -44,6 +45,7 @@ def pivotDumpTable(table, colList, count=None, blind=True, alias=None):
 
     validColumnList = False
     validPivotValue = False
+    compositePivot = None
 
     if count is None:
         query = dumpNode.count % table
@@ -58,7 +60,7 @@ def pivotDumpTable(table, colList, count=None, blind=True, alias=None):
         logger.info(infoMsg)
 
         for column in colList:
-            lengths[column] = len(column)
+            lengths[column] = getConsoleLength(column)
             entries[column] = []
 
         return entries, lengths
@@ -70,7 +72,7 @@ def pivotDumpTable(table, colList, count=None, blind=True, alias=None):
         lengths[column] = 0
         entries[column] = BigArray()
 
-    colList = filterNone(sorted(colList, key=lambda x: len(x) if x else MAX_INT))
+    colList = prioritySortColumns(filterNone(colList))
 
     if conf.pivotColumn:
         for _ in colList:
@@ -88,7 +90,7 @@ def pivotDumpTable(table, colList, count=None, blind=True, alias=None):
         if not validPivotValue:
             warnMsg = "column '%s' not " % conf.pivotColumn
             warnMsg += "found in table '%s'" % table
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
     if not validPivotValue:
         for column in colList:
@@ -118,9 +120,29 @@ def pivotDumpTable(table, colList, count=None, blind=True, alias=None):
             raise SqlmapNoneDataException(errMsg)
 
         if not validPivotValue:
+            # No single column holds all-distinct values. Fall back to a COMPOSITE pivot (a
+            # concatenation of every column) whose combined value is unique per row, so rows sharing
+            # a value in every individual column are no longer silently dropped (ref: #1545).
+            _composite = agent.concatQuery(','.join(colList))
+            query = dumpNode.count2 % (_composite, table)
+            query = agent.whereQuery(query)
+            value = inject.getValue(query, blind=blind, union=not blind, error=not blind, expected=EXPECTED.INT, charsetType=CHARSET_TYPE.DIGITS)
+
+            if isNumPosStrValue(value) and int(value) == count:
+                infoMsg = "using a concatenation of all columns as a "
+                infoMsg += "composite pivot for retrieving row data"
+                logger.info(infoMsg)
+
+                compositePivot = _composite
+                lengths[compositePivot] = 0
+                entries[compositePivot] = BigArray()
+                colList.insert(0, compositePivot)
+                validPivotValue = True
+
+        if not validPivotValue:
             warnMsg = "no proper pivot column provided (with unique values)."
             warnMsg += " It won't be possible to retrieve all rows"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
     pivotValue = " "
     breakRetrieval = False
@@ -169,7 +191,7 @@ def pivotDumpTable(table, colList, count=None, blind=True, alias=None):
 
                 value = "" if isNoneValue(value) else unArrayizeValue(value)
 
-                lengths[column] = max(lengths[column], len(DUMP_REPLACEMENTS.get(getUnicode(value), getUnicode(value))))
+                lengths[column] = max(lengths[column], getConsoleLength(DUMP_REPLACEMENTS.get(getUnicode(value), getUnicode(value))))
                 entries[column].append(value)
 
     except KeyboardInterrupt:
@@ -177,12 +199,17 @@ def pivotDumpTable(table, colList, count=None, blind=True, alias=None):
 
         warnMsg = "user aborted during enumeration. sqlmap "
         warnMsg += "will display partial output"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     except SqlmapConnectionException as ex:
         errMsg = "connection exception detected ('%s'). sqlmap " % getSafeExString(ex)
         errMsg += "will display partial output"
 
         logger.critical(errMsg)
+
+    # The composite pivot is a synthetic paging key, not a real column - drop it from the output
+    if compositePivot is not None:
+        entries.pop(compositePivot, None)
+        lengths.pop(compositePivot, None)
 
     return entries, lengths

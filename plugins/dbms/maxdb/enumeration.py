@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -37,7 +37,7 @@ class Enumeration(GenericEnumeration):
 
     def getPasswordHashes(self):
         warnMsg = "on SAP MaxDB it is not possible to enumerate the user password hashes"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return {}
 
@@ -108,7 +108,7 @@ class Enumeration(GenericEnumeration):
                 warnMsg = "missing database parameter. sqlmap is going "
                 warnMsg += "to use the current database to enumerate "
                 warnMsg += "table(s) columns"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
             conf.db = self.getCurrentDb()
 
@@ -197,9 +197,9 @@ class Enumeration(GenericEnumeration):
                 return {conf.db: kb.data.cachedColumns[conf.db]}
 
             if dumpMode and colList:
-                table = {}
-                table[safeSQLIdentificatorNaming(tbl, True)] = dict((_, None) for _ in colList)
-                kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = table
+                if safeSQLIdentificatorNaming(conf.db) not in kb.data.cachedColumns:
+                    kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = {}
+                kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)][safeSQLIdentificatorNaming(tbl, True)] = dict((_, None) for _ in colList)
                 continue
 
             infoMsg = "fetching columns "
@@ -219,27 +219,28 @@ class Enumeration(GenericEnumeration):
                 for columnname, datatype, length in _zip(retVal[0]["%s.columnname" % kb.aliasName], retVal[0]["%s.datatype" % kb.aliasName], retVal[0]["%s.len" % kb.aliasName]):
                     columns[safeSQLIdentificatorNaming(columnname)] = "%s(%s)" % (datatype, length)
 
-                table[tbl] = columns
-                kb.data.cachedColumns[conf.db] = table
+                if conf.db not in kb.data.cachedColumns:
+                    kb.data.cachedColumns[conf.db] = {}
+                kb.data.cachedColumns[conf.db][tbl] = columns
 
         return kb.data.cachedColumns
 
     def getPrivileges(self, *args, **kwargs):
         warnMsg = "on SAP MaxDB it is not possible to enumerate the user privileges"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return {}
 
     def search(self):
         warnMsg = "on SAP MaxDB search option is not available"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     def getHostname(self):
         warnMsg = "on SAP MaxDB it is not possible to enumerate the hostname"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     def getStatements(self):
         warnMsg = "on SAP MaxDB it is not possible to enumerate the SQL statements"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return []

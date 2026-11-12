@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -87,31 +87,42 @@ class Fingerprint(GenericFingerprint):
         infoMsg = "testing %s" % DBMS.H2
         logger.info(infoMsg)
 
-        result = inject.checkBooleanExpression("ZERO() IS 0")
+        result = inject.checkBooleanExpression("ZERO()=0")
 
         if result:
             infoMsg = "confirming %s" % DBMS.H2
             logger.info(infoMsg)
 
-            result = inject.checkBooleanExpression("ROUNDMAGIC(PI())>=3")
+            result = inject.checkBooleanExpression("ROUNDMAGIC(PI())>=3")    # Note: same check without the blacklisted LEAST()
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.H2
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return False
             else:
                 setDbms(DBMS.H2)
+
+                result = inject.checkBooleanExpression("JSON_OBJECT() IS NOT NULL")
+                version = '2' if result else '1'
+                Backend.setVersion(version)
 
                 self.getBanner()
 
                 return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.H2
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False
 
     def getHostname(self):
         warnMsg = "on H2 it is not possible to enumerate the hostname"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
+
+    def checkDbmsOs(self, detailed=False):
+        if Backend.getOs():
+            infoMsg = "the back-end DBMS operating system is %s" % Backend.getOs()
+            logger.info(infoMsg)
+        else:
+            self.userChooseDbmsOs()

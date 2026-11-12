@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -41,8 +41,12 @@ class Fingerprint(GenericFingerprint):
                 fork = FORK.ENTERPRISEDB
             elif inject.checkBooleanExpression("VERSION() LIKE '%YB-%'"):           # Reference: https://github.com/yugabyte/yugabyte-db/issues/2447#issue-499562926
                 fork = FORK.YUGABYTEDB
+            elif inject.checkBooleanExpression("VERSION() LIKE '%openGauss%'"):
+                fork = FORK.OPENGAUSS
             elif inject.checkBooleanExpression("AURORA_VERSION() LIKE '%'"):        # Reference: https://aws.amazon.com/premiumsupport/knowledge-center/aurora-version-number/
                 fork = FORK.AURORA
+            elif inject.checkBooleanExpression("[1,2,3][2]=2"):                      # NOTE: bare list literal with 1-based indexing is DuckDB-only (invalid syntax on PostgreSQL)
+                fork = FORK.DUCKDB
             else:
                 fork = ""
 
@@ -107,17 +111,19 @@ class Fingerprint(GenericFingerprint):
         logger.info(infoMsg)
 
         # NOTE: Vertica works too without the CONVERT_TO()
-        result = inject.checkBooleanExpression("CONVERT_TO('[RANDSTR]', QUOTE_IDENT(NULL)) IS NULL")
+        # NOTE: DuckDB (PostgreSQL dialect fork) lacks CONVERT_TO()/QUOTE_IDENT(), so it is accepted via its list-literal instead
+        result = inject.checkBooleanExpression("CONVERT_TO('[RANDSTR]', QUOTE_IDENT(NULL)) IS NULL") or inject.checkBooleanExpression("[1,2,3][2]=2")
 
         if result:
             infoMsg = "confirming %s" % DBMS.PGSQL
             logger.info(infoMsg)
 
-            result = inject.checkBooleanExpression("COALESCE([RANDNUM], NULL)=[RANDNUM]")
+            # Note: TO_HEX() is PostgreSQL specific as well, and not blacklisted like COALESCE()
+            result = inject.checkBooleanExpression("TO_HEX([RANDNUM]) IS NOT NULL")
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.PGSQL
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return False
 
@@ -131,7 +137,15 @@ class Fingerprint(GenericFingerprint):
             infoMsg = "actively fingerprinting %s" % DBMS.PGSQL
             logger.info(infoMsg)
 
-            if inject.checkBooleanExpression("GEN_RANDOM_UUID() IS NOT NULL"):
+            if inject.checkBooleanExpression("JSON_QUERY(NULL::jsonb, '$') IS NULL"):
+                Backend.setVersion(">= 17.0")
+            elif inject.checkBooleanExpression("RANDOM_NORMAL(0.0, 1.0) IS NOT NULL"):
+                Backend.setVersion(">= 16.0")
+            elif inject.checkBooleanExpression("REGEXP_COUNT(NULL,NULL) IS NULL"):
+                Backend.setVersion(">= 15.0")
+            elif inject.checkBooleanExpression("TRIM_ARRAY(ARRAY[1,2],1)=ARRAY[1]"):    # Note: same release as the blacklisted BIT_COUNT()
+                Backend.setVersion(">= 14.0")
+            elif inject.checkBooleanExpression("NULL::anycompatible IS NULL"):
                 Backend.setVersion(">= 13.0")
             elif inject.checkBooleanExpression("SINH(0)=0"):
                 Backend.setVersion(">= 12.0")
@@ -141,7 +155,7 @@ class Fingerprint(GenericFingerprint):
                 Backend.setVersionList([">= 10.0", "< 11.0"])
             elif inject.checkBooleanExpression("SIND(0)=0"):
                 Backend.setVersionList([">= 9.6.0", "< 10.0"])
-            elif inject.checkBooleanExpression("TO_JSONB(1) IS NOT NULL"):
+            elif inject.checkBooleanExpression("ARRAY_POSITION(ARRAY[1,2],2)=2"):       # Note: same release as the blacklisted TO_JSONB()
                 Backend.setVersionList([">= 9.5.0", "< 9.6.0"])
             elif inject.checkBooleanExpression("JSON_TYPEOF(NULL) IS NULL"):
                 Backend.setVersionList([">= 9.4.0", "< 9.5.0"])
@@ -187,7 +201,7 @@ class Fingerprint(GenericFingerprint):
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.PGSQL
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False
 

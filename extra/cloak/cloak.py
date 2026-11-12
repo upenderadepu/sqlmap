@@ -3,7 +3,7 @@
 """
 cloak.py - Simple file encryption/compression utility
 
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -21,7 +21,7 @@ if sys.version_info >= (3, 0):
     xrange = range
     ord = lambda _: _
 
-KEY = b"ENWsCymUeJcXqSbD"
+KEY = b"ZCuk6GdHSj4KtgDq"
 
 def xor(message, key):
     return b"".join(struct.pack('B', ord(message[i]) ^ ord(key[i % len(key)])) for i in range(len(message)))
@@ -43,8 +43,6 @@ def decloak(inputFile=None, data=None):
         print(ex)
         print('ERROR: the provided input file \'%s\' does not contain valid cloaked content' % inputFile)
         sys.exit(1)
-    finally:
-        f.close()
 
     return data
 

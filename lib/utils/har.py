@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -36,10 +36,10 @@ class HTTPCollector(object):
     def setExtendedArguments(self, arguments):
         self.extendedArguments = arguments
 
-    def collectRequest(self, requestMessage, responseMessage, startTime=None, endTime=None):
+    def collectRequest(self, requestMessage, responseMessage, startTime=None, endTime=None, scheme=None):
         self.messages.append(RawPair(requestMessage, responseMessage,
                                      startTime=startTime, endTime=endTime,
-                                     extendedArguments=self.extendedArguments))
+                                     extendedArguments=self.extendedArguments, scheme=scheme))
 
     def obtain(self):
         return {"log": {
@@ -49,15 +49,16 @@ class HTTPCollector(object):
         }}
 
 class RawPair(object):
-    def __init__(self, request, response, startTime=None, endTime=None, extendedArguments=None):
+    def __init__(self, request, response, startTime=None, endTime=None, extendedArguments=None, scheme=None):
         self.request = getBytes(request)
         self.response = getBytes(response)
         self.startTime = startTime
         self.endTime = endTime
         self.extendedArguments = extendedArguments or {}
+        self.scheme = scheme    # Note: of the target at the time of the request (as origin-form request lines don't carry one)
 
     def toEntry(self):
-        return Entry(request=Request.parse(self.request), response=Response.parse(self.response),
+        return Entry(request=Request.parse(self.request, self.scheme), response=Response.parse(self.response),
                      startTime=self.startTime, endTime=self.endTime,
                      extendedArguments=self.extendedArguments)
 
@@ -86,7 +87,7 @@ class Entry(object):
         return out
 
 class Request(object):
-    def __init__(self, method, path, httpVersion, headers, postBody=None, raw=None, comment=None):
+    def __init__(self, method, path, httpVersion, headers, postBody=None, raw=None, comment=None, scheme=None):
         self.method = method
         self.path = path
         self.httpVersion = httpVersion
@@ -94,9 +95,10 @@ class Request(object):
         self.postBody = postBody
         self.comment = comment.strip() if comment else comment
         self.raw = raw
+        self.scheme = scheme
 
     @classmethod
-    def parse(cls, raw):
+    def parse(cls, raw, scheme=None):
         request = HTTPRequest(raw)
         return cls(method=request.command,
                    path=request.path,
@@ -104,19 +106,23 @@ class Request(object):
                    headers=request.headers,
                    postBody=request.rfile.read(),
                    comment=request.comment,
-                   raw=raw)
+                   raw=raw,
+                   scheme=scheme)
 
     @property
     def url(self):
+        if re.search(r"(?i)\Ahttps?://", self.path or ""):    # Note: absolute-form request target (e.g. refreshing/crawling/checking requests)
+            return self.path
+
         host = self.headers.get("Host", "unknown")
-        return "http://%s%s" % (host, self.path)
+        return "%s://%s%s" % (self.scheme or "http", host, self.path)
 
     def toDict(self):
         out = {
             "httpVersion": self.httpVersion,
             "method": self.method,
             "url": self.url,
-            "headers": [dict(name=key.capitalize(), value=value) for key, value in self.headers.items()],
+            "headers": [dict(name="-".join(_.capitalize() for _ in key.split("-")), value=value) for key, value in self.headers.items()],
             "cookies": [],
             "queryString": [],
             "headersSize": -1,
@@ -125,11 +131,17 @@ class Request(object):
         }
 
         if self.postBody:
-            contentType = self.headers.get("Content-Type")
-            out["postData"] = {
-                "mimeType": contentType,
-                "text": getText(self.postBody).rstrip("\r\n"),
-            }
+            out["postData"] = {"mimeType": self.headers.get("Content-Type")}
+
+            # HAR text must be UTF-8: a binary POST body (e.g. a file upload) that does not decode is
+            # base64-encoded losslessly rather than mangled through a lossy text decode - mirroring the
+            # Response.toDict() contract below (otherwise the exported HAR cannot reproduce the request)
+            raw = self.postBody if isinstance(self.postBody, bytes) else getBytes(self.postBody)
+            try:
+                out["postData"]["text"] = raw.decode("utf-8").rstrip("\r\n")
+            except UnicodeDecodeError:
+                out["postData"]["encoding"] = "base64"
+                out["postData"]["text"] = getText(base64.b64encode(raw))
 
         return out
 
@@ -162,6 +174,9 @@ class Response(object):
         response = _http_client.HTTPResponse(FakeSocket(altered))
         response.begin()
 
+        # NOTE: https://github.com/sqlmapproject/sqlmap/issues/5942
+        response.length = len(raw[raw.find(b"\r\n\r\n") + 4:])
+
         try:
             content = response.read()
         except _http_client.IncompleteRead:
@@ -178,22 +193,28 @@ class Response(object):
     def toDict(self):
         content = {
             "mimeType": self.headers.get("Content-Type"),
-            "text": self.content,
             "size": len(self.content or "")
         }
 
-        binary = set([b'\0', b'\1'])
-        if any(c in binary for c in self.content):
-            content["encoding"] = "base64"
-            content["text"] = getText(base64.b64encode(self.content))
+        # HAR text must be UTF-8: a body that does not decode (binary content such as an image, or
+        # text in another charset) is base64-encoded losslessly rather than mangled through a lossy
+        # text decode. The previous check only treated NUL/0x01 as binary, so e.g. a JPEG lacking
+        # those bytes was corrupted into the "text" field.
+        raw = self.content or b""
+        if not isinstance(raw, bytes):
+            content["text"] = getText(raw)
         else:
-            content["text"] = getText(content["text"])
+            try:
+                content["text"] = getText(raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                content["encoding"] = "base64"
+                content["text"] = getText(base64.b64encode(raw))
 
         return {
             "httpVersion": self.httpVersion,
             "status": self.status,
             "statusText": self.statusText,
-            "headers": [dict(name=key.capitalize(), value=value) for key, value in self.headers.items() if key.lower() != "uri"],
+            "headers": [dict(name="-".join(_.capitalize() for _ in key.split("-")), value=value) for key, value in self.headers.items() if key.lower() != "uri"],
             "cookies": [],
             "content": content,
             "headersSize": -1,

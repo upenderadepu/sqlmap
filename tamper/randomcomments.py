@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -16,7 +16,7 @@ __priority__ = PRIORITY.LOW
 
 def tamper(payload, **kwargs):
     """
-    Add random inline comments inside SQL keywords (e.g. SELECT -> S/**/E/**/LECT)
+    Inserts random inline comments within SQL keywords (e.g. SELECT -> S/**/E/**/LECT)
 
     >>> import random
     >>> random.seed(0)
@@ -45,6 +45,6 @@ def tamper(payload, **kwargs):
                     index = randomRange(1, len(word) - 1)
                     _ = word[:index] + "/**/" + word[index:]
 
-                retVal = retVal.replace(word, _)
+                retVal = re.sub(r"\b%s\b" % word, _, retVal)
 
     return retVal

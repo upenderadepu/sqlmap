@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -29,7 +29,6 @@ from lib.core.common import initTechnique
 from lib.core.common import isListLike
 from lib.core.common import isNumPosStrValue
 from lib.core.common import listToStrValue
-from lib.core.common import readInput
 from lib.core.common import unArrayizeValue
 from lib.core.common import wasLastResponseHTTPError
 from lib.core.compat import xrange
@@ -51,7 +50,6 @@ from lib.core.settings import MIN_ERROR_CHUNK_LENGTH
 from lib.core.settings import NULL
 from lib.core.settings import PARTIAL_VALUE_MARKER
 from lib.core.settings import ROTATING_CHARS
-from lib.core.settings import SLOW_ORDER_COUNT_THRESHOLD
 from lib.core.settings import SQL_SCALAR_REGEX
 from lib.core.settings import TURN_OFF_RESUME_INFO_LIMIT
 from lib.core.threads import getCurrentThreadData
@@ -76,7 +74,7 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
 
     threadData.resumed = retVal is not None and not partialValue
 
-    if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE)) and kb.errorChunkLength is None and not chunkTest and not kb.testMode:
+    if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE, DBMS.FIREBIRD)) and kb.errorChunkLength is None and not chunkTest and not kb.testMode:
         debugMsg = "searching for error chunk length..."
         logger.debug(debugMsg)
 
@@ -85,11 +83,13 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
         while current >= MIN_ERROR_CHUNK_LENGTH:
             testChar = str(current % 10)
 
-            if Backend.isDbms(DBMS.ORACLE):
+            if Backend.isDbms(DBMS.ORACLE) or Backend.isDbms(DBMS.FIREBIRD):
                 testQuery = "RPAD('%s',%d,'%s')" % (testChar, current, testChar)
             else:
                 testQuery = "%s('%s',%d)" % ("REPEAT" if Backend.isDbms(DBMS.MYSQL) else "REPLICATE", testChar, current)
-                testQuery = "SELECT %s" % (agent.hexConvertField(testQuery) if conf.hexConvert else testQuery)
+                # chunk length is the channel's CHAR capacity (hex-independent); a hex-wrapped probe doubles
+                # the length and mis-detects (pins to the minimum), so probe plain even under --hex
+                testQuery = "SELECT %s" % testQuery
 
             result = unArrayizeValue(_oneShotErrorUse(testQuery, chunkTest=True))
             seen.add(current)
@@ -119,7 +119,7 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                 if field:
                     nulledCastedField = agent.nullAndCastField(field)
 
-                    if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE)) and not any(_ in field for _ in ("COUNT", "CASE")) and kb.errorChunkLength and not chunkTest:
+                    if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE, DBMS.FIREBIRD)) and not any(_ in field for _ in ("COUNT", "CASE")) and kb.errorChunkLength and not chunkTest:
                         extendedField = re.search(r"[^ ,]*%s[^ ,]*" % re.escape(field), expression).group(0)
                         if extendedField != field:  # e.g. MIN(surname)
                             nulledCastedField = extendedField.replace(field, nulledCastedField)
@@ -167,7 +167,7 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                             warnMsg = "possible server trimmed output detected "
                             warnMsg += "(due to its length and/or content): "
                             warnMsg += safecharencode(trimmed)
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
                         if not kb.testMode:
                             check = r"(?P<result>[^<>\n]*?)%s" % kb.chars.stop[:2]
@@ -179,7 +179,7 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                             else:
                                 output = output.rstrip()
 
-                if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE)):
+                if any(Backend.isDbms(dbms) for dbms in (DBMS.MYSQL, DBMS.MSSQL, DBMS.SYBASE, DBMS.ORACLE, DBMS.FIREBIRD)):
                     if offset == 1:
                         retVal = output
                     else:
@@ -208,10 +208,14 @@ def _oneShotErrorUse(expression, field=None, chunkTest=False):
                 hashDBWrite(expression, "%s%s" % (retVal, PARTIAL_VALUE_MARKER))
             raise
 
-        retVal = decodeDbmsHexValue(retVal) if conf.hexConvert else retVal
+        retVal = decodeDbmsHexValue(retVal) if conf.hexConvert and not chunkTest else retVal
 
         if isinstance(retVal, six.string_types):
             retVal = htmlUnescape(retVal).replace("<br>", "\n")
+
+            # Note: SQLite's error message of JSON_EXTRACT (e.g. "bad JSON path: '...'") quotes the (path) value by doubling its single quotes
+            if Backend.isDbms(DBMS.SQLITE) and not conf.hexConvert and "JSON_EXTRACT" in (getTechniqueData().vector or ""):
+                retVal = retVal.replace("''", "'")
 
         retVal = _errorReplaceChars(retVal)
 
@@ -257,7 +261,7 @@ def _errorFields(expression, expressionFields, expressionFieldsList, num=None, e
             elif output is not None and not (threadData.resumed and kb.suppressResumeInfo) and not (emptyFields and field in emptyFields):
                 status = "[%s] [INFO] %s: '%s'" % (time.strftime("%X"), "resumed" if threadData.resumed else "retrieved", output if kb.safeCharEncode else safecharencode(output))
 
-                if len(status) > width:
+                if len(status) > width and not conf.noTruncate:
                     status = "%s..." % status[:width - 3]
 
                 dataToStdout("%s\n" % status)
@@ -314,20 +318,22 @@ def errorUse(expression, dump=False):
 
     _, _, _, _, _, expressionFieldsList, expressionFields, _ = agent.getFields(expression)
 
-    # Set kb.partRun in case the engine is called from the API
-    kb.partRun = getPartRun(alias=False) if conf.api else None
+    # Set kb.partRun in case the engine is called from the API or a JSON report is being collected
+    kb.partRun = getPartRun(alias=False) if (conf.api or conf.reportJson) else None
 
     # We have to check if the SQL query might return multiple entries
     # and in such case forge the SQL limiting the query output one
     # entry at a time
     # NOTE: we assume that only queries that get data from a table can
     # return multiple entries
-    if (dump and (conf.limitStart or conf.limitStop)) or (" FROM " in expression.upper() and ((Backend.getIdentifiedDbms() not in FROM_DUMMY_TABLE) or (Backend.getIdentifiedDbms() in FROM_DUMMY_TABLE and not expression.upper().endswith(FROM_DUMMY_TABLE[Backend.getIdentifiedDbms()]))) and ("(CASE" not in expression.upper() or ("(CASE" in expression.upper() and "WHEN use" in expression))) and not re.search(SQL_SCALAR_REGEX, expression, re.I):
+    if not re.search(SQL_SCALAR_REGEX, expression, re.I) and ((dump and (conf.limitStart or conf.limitStop)) or (" FROM " in expression.upper() and ((Backend.getIdentifiedDbms() not in FROM_DUMMY_TABLE) or (Backend.getIdentifiedDbms() in FROM_DUMMY_TABLE and not expression.upper().endswith(FROM_DUMMY_TABLE[Backend.getIdentifiedDbms()]))) and ("(CASE" not in expression.upper() or ("(CASE" in expression.upper() and "WHEN use" in expression)))):
         expression, limitCond, topLimit, startLimit, stopLimit = agent.limitCondition(expression, dump)
 
         if limitCond:
-            # Count the number of SQL query entries output
-            countedExpression = expression.replace(expressionFields, queries[Backend.getIdentifiedDbms()].count.query % ('*' if len(expressionFieldsList) > 1 else expressionFields), 1)
+            # Count the number of SQL query entries output. NOTE: always COUNT(*) (row count); a single
+            # field must NOT use COUNT(field) as that excludes NULLs and would drop NULL-valued rows from
+            # the dump (e.g. a column whose value is NULL on some rows).
+            countedExpression = expression.replace(expressionFields, queries[Backend.getIdentifiedDbms()].count.query % '*', 1)
 
             if " ORDER BY " in countedExpression.upper():
                 _ = countedExpression.upper().rindex(" ORDER BY ")
@@ -351,27 +357,24 @@ def errorUse(expression, dump=False):
                 warnMsg += "of entries for the SQL query provided. "
                 warnMsg += "sqlmap will assume that it returns only "
                 warnMsg += "one entry"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 stopLimit = 1
 
-            elif (not count or int(count) == 0):
+            elif not isNumPosStrValue(count):
                 if not count:
                     warnMsg = "the SQL query provided does not "
                     warnMsg += "return any output"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
                 else:
                     value = []  # for empty tables
                 return value
 
             if isNumPosStrValue(count) and int(count) > 1:
-                if " ORDER BY " in expression and (stopLimit - startLimit) > SLOW_ORDER_COUNT_THRESHOLD:
-                    message = "due to huge table size do you want to remove "
-                    message += "ORDER BY clause gaining speed over consistency? [y/N] "
-
-                    if readInput(message, default='N', boolean=True):
-                        expression = expression[:expression.index(" ORDER BY ")]
-
+                # NOTE: the ORDER BY clause is deliberately NOT stripped here. This path fetches each column
+                # of a row in a separate LIMIT/OFFSET query, so dropping ORDER BY would let the per-column
+                # offsets resolve to different physical rows and silently misalign cells across the row. Huge
+                # tables are handled cheaply and safely by keyset (seek) pagination (see plugins/generic/entries.py).
                 numThreads = min(conf.threads, (stopLimit - startLimit))
 
                 threadData = getCurrentThreadData()
@@ -445,7 +448,7 @@ def errorUse(expression, dump=False):
                     abortedFlag = True
                     warnMsg = "user aborted during enumeration. sqlmap "
                     warnMsg += "will display partial output"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
                 finally:
                     threadData.shared.value.extend(_[1] for _ in sorted(threadData.shared.buffered))

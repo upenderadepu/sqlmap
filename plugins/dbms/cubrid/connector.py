@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -30,8 +30,10 @@ class Connector(GenericConnector):
         self.initConnection()
 
         try:
-            self.connector = CUBRIDdb.connect(hostname=self.hostname, username=self.user, password=self.password, database=self.db, port=self.port, connect_timeout=conf.timeout)
-        except CUBRIDdb.DatabaseError as ex:
+            # CUBRIDdb.connect takes a positional URL 'CUBRID:host:port:db:::' then user/password positionally
+            # (it does not accept hostname/username/database keyword args, which raised a TypeError before)
+            self.connector = CUBRIDdb.connect("CUBRID:%s:%s:%s:::" % (self.hostname, self.port, self.db), str(self.user), str(self.password))
+        except CUBRIDdb.Error as ex:
             raise SqlmapConnectionException(getSafeExString(ex))
 
         self.initCursor()

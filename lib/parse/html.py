@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -9,6 +9,7 @@ import re
 
 from xml.sax.handler import ContentHandler
 
+from lib.core.common import singleTimeWarnMessage
 from lib.core.common import urldecode
 from lib.core.common import parseXmlFile
 from lib.core.data import kb
@@ -27,11 +28,11 @@ class HTMLHandler(ContentHandler):
 
         self._dbms = None
         self._page = (page or "")
+        self._urldecodedPage = urldecode(self._page)
         try:
-            self._lower_page = self._page.lower()
+            self._lowerPage = self._urldecodedPage.lower()  # Note: keyword pre-filter must match the page that re.search() runs on (the URL-decoded one)
         except SystemError:  # https://bugs.python.org/issue18183
-            self._lower_page = None
-        self._urldecoded_page = urldecode(self._page)
+            self._lowerPage = None
 
         self.dbms = None
 
@@ -53,7 +54,7 @@ class HTMLHandler(ContentHandler):
                 keywords = sorted(keywords, key=len)
                 kb.cache.regex[regexp] = keywords[-1].lower()
 
-            if ('|' in regexp or kb.cache.regex[regexp] in (self._lower_page or kb.cache.regex[regexp])) and re.search(regexp, self._urldecoded_page, re.I):
+            if ('|' in regexp or kb.cache.regex[regexp] in (self._lowerPage or kb.cache.regex[regexp])) and re.search(regexp, self._urldecodedPage, re.I):
                 self.dbms = self._dbms
                 self._markAsErrorPage()
                 kb.forkNote = kb.forkNote or attrs.get("fork")
@@ -86,7 +87,12 @@ def htmlParser(page):
             handler._markAsErrorPage()
         return retVal
 
-    parseXmlFile(xmlfile, handler)
+    try:
+        parseXmlFile(xmlfile, handler)
+    except Exception:
+        # DBMS fingerprinting from the error page is best-effort - a broken or third-party-patched
+        # xml.sax (e.g. a modified stdlib on some distros) must not abort the whole scan (see #6086)
+        singleTimeWarnMessage("unable to parse the response page for DBMS-specific error messages")
 
     if handler.dbms and handler.dbms not in kb.htmlFp:
         kb.lastParserStatus = handler.dbms

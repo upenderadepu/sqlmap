@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -68,7 +68,7 @@ class Filesystem(GenericFilesystem):
             if conf.direct or isTechniqueAvailable(PAYLOAD.TECHNIQUE.UNION):
                 if not kb.bruteMode:
                     warnMsg += ", going to fall-back to simpler UNION technique"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
                 result = self.nonStackedReadFile(remoteFile)
             else:
                 raise SqlmapNoneDataException(warnMsg)
@@ -79,7 +79,7 @@ class Filesystem(GenericFilesystem):
             if length > chunkSize:
                 result = []
 
-                for i in xrange(1, length, chunkSize):
+                for i in xrange(1, length + 1, chunkSize):
                     chunk = inject.getValue("SELECT MID(%s, %d, %d) FROM %s" % (self.tblField, i, chunkSize, self.fileTblName), unpack=False, resumeValue=False, charsetType=CHARSET_TYPE.HEXADECIMAL)
                     result.append(chunk)
             else:
@@ -100,7 +100,7 @@ class Filesystem(GenericFilesystem):
             warnMsg += "to be written hexadecimal value is %d " % fcEncodedStrLen
             warnMsg += "bytes, this might cause errors in the file "
             warnMsg += "writing process"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
         debugMsg = "exporting the %s file content to file '%s'" % (fileType, remoteFile)
         logger.debug(debugMsg)
@@ -129,7 +129,7 @@ class Filesystem(GenericFilesystem):
             warnMsg += "to be written hexadecimal value is %d " % fcEncodedStrLen
             warnMsg += "bytes, this might cause errors in the file "
             warnMsg += "writing process"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
         debugMsg = "exporting the %s file content to file '%s'" % (fileType, remoteFile)
         logger.debug(debugMsg)

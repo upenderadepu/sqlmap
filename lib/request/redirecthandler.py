@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import io
+import re
 import time
 import types
 
@@ -31,7 +32,9 @@ from lib.core.settings import MAX_TOTAL_REDIRECTIONS
 from lib.core.threads import getCurrentThreadData
 from lib.request.basic import decodePage
 from lib.request.basic import parseResponse
+from lib.request import authrefresh
 from thirdparty import six
+from thirdparty.six.moves import http_client as _http_client
 from thirdparty.six.moves import urllib as _urllib
 
 class SmartRedirectHandler(_urllib.request.HTTPRedirectHandler):
@@ -66,24 +69,33 @@ class SmartRedirectHandler(_urllib.request.HTTPRedirectHandler):
                 self.redirect_request = self._redirect_request
 
     def _redirect_request(self, req, fp, code, msg, headers, newurl):
-        return _urllib.request.Request(newurl.replace(' ', '%20'), data=req.data, headers=req.headers, origin_req_host=req.get_origin_req_host())
+        retVal = _urllib.request.Request(newurl.replace(' ', '%20'), data=req.data, headers=req.headers, origin_req_host=req.get_origin_req_host() if hasattr(req, "get_origin_req_host") else req.origin_req_host)
+
+        if hasattr(req, "redirect_dict"):
+            retVal.redirect_dict = req.redirect_dict
+
+        return retVal
 
     def http_error_302(self, req, fp, code, msg, headers):
         start = time.time()
         content = None
+        forceRedirect = False
         redurl = self._get_header_redirect(headers) if not conf.ignoreRedirects else None
 
         try:
+            # Note: drain via the length-aware response (honors Content-Length/chunked), NOT the raw
+            # socket 'fp.fp' - the latter has no HTTP framing, so on a Keep-Alive connection (no EOF)
+            # it blocks for the whole '--timeout' on every redirect (Issue #6080)
             content = fp.read(MAX_CONNECTION_TOTAL_SIZE)
-        except:  # e.g. IncompleteRead
+        except _http_client.IncompleteRead as ex:
+            content = ex.partial
+        except:
             content = b""
-        finally:
-            if content:
-                try:  # try to write it back to the read buffer so we could reuse it in further steps
-                    fp.fp._rbuf.truncate(0)
-                    fp.fp._rbuf.write(content)
-                except:
-                    pass
+
+        # back 'fp' with the captured body so it stays re-readable downstream (Issue #5985); the
+        # length-aware read above has consumed the response, so restore both the buffer and read()
+        fp.fp = io.BytesIO(content)
+        fp.read = fp.fp.read
 
         content = decodePage(content, headers.get(HTTP_HEADER.CONTENT_ENCODING), headers.get(HTTP_HEADER.CONTENT_TYPE))
 
@@ -111,12 +123,24 @@ class SmartRedirectHandler(_urllib.request.HTTPRedirectHandler):
                     redurl = _urllib.parse.urljoin(req.get_full_url(), redurl)
 
                 self._infinite_loop_check(req)
-                self._ask_redirect_choice(code, redurl, req.get_method())
+                crawlRedirectFilter = getattr(threadData, "crawlRedirectFilter", None)
+                if crawlRedirectFilter is not None and not crawlRedirectFilter(redurl):
+                    # a crawler recon/source-map fetch carries the session cookie; it must NOT follow an
+                    # (attacker-controlled) redirect out of scope - reject the hop before it is made, so the
+                    # cookie never reaches the off-scope destination (works even when no explicit --scope is set)
+                    redurl = None
+                elif conf.scope:
+                    if not re.search(conf.scope, redurl, re.I):
+                        redurl = None
+                    else:
+                        forceRedirect = True
+                else:
+                    self._ask_redirect_choice(code, redurl, req.get_method())
             except ValueError:
                 redurl = None
                 result = fp
 
-        if redurl and kb.choices.redirect == REDIRECTION.YES:
+        if redurl and (kb.choices.redirect == REDIRECTION.YES or forceRedirect):
             parseResponse(content, headers)
 
             req.headers[HTTP_HEADER.HOST] = getHostHeader(redurl)
@@ -125,7 +149,7 @@ class SmartRedirectHandler(_urllib.request.HTTPRedirectHandler):
                 delimiter = conf.cookieDel or DEFAULT_COOKIE_DELIMITER
                 last = None
 
-                for part in getUnicode(req.headers.get(HTTP_HEADER.COOKIE, "")).split(delimiter) + ([headers[HTTP_HEADER.SET_COOKIE]] if HTTP_HEADER.SET_COOKIE in headers else []):
+                for part in getUnicode(req.headers.get(HTTP_HEADER.COOKIE, "")).split(delimiter):
                     if '=' in part:
                         part = part.strip()
                         key, value = part.split('=', 1)
@@ -134,12 +158,31 @@ class SmartRedirectHandler(_urllib.request.HTTPRedirectHandler):
                     elif last:
                         cookies[last] += "%s%s" % (delimiter, part)
 
+                # Note: multiple cookies arrive as SEPARATE Set-Cookie headers (RFC-6265 forbids folding
+                # them into one comma-joined value), and __getitem__ returns only the FIRST - iterate all
+                # values so 2nd+ cookies (e.g. a CSRF token) are not silently dropped across the redirect
+                # (get_all on py3 email.message.Message, getheaders on py2 mimetools.Message)
+                if hasattr(headers, "get_all"):
+                    setCookies = headers.get_all(HTTP_HEADER.SET_COOKIE)
+                elif hasattr(headers, "getheaders"):
+                    setCookies = headers.getheaders(HTTP_HEADER.SET_COOKIE)
+                else:
+                    setCookies = [headers[HTTP_HEADER.SET_COOKIE]]
+                for setCookie in setCookies:
+                    for match in re.finditer(r"(?:^|,\s*)([^=;,]+)=([^;,]+)", setCookie):
+                        key = match.group(1).strip()
+                        if key.lower() not in ("expires", "path", "domain", "max-age", "secure", "httponly", "samesite"):
+                            cookies[key] = match.group(2).strip()
+
                 req.headers[HTTP_HEADER.COOKIE] = delimiter.join("%s=%s" % (key, cookies[key]) for key in cookies)
 
             try:
+                if conf.authRefresh and not authrefresh.sameOrigin(req.get_full_url(), redurl):
+                    req.headers = authrefresh.stripHeaders(req.headers)
+                    req.unredirected_hdrs = authrefresh.stripHeaders(req.unredirected_hdrs)
                 result = _urllib.request.HTTPRedirectHandler.http_error_302(self, req, fp, code, msg, headers)
             except _urllib.error.HTTPError as ex:
-                result = ex
+                result = error = ex
 
                 # Dirty hack for https://github.com/sqlmapproject/sqlmap/issues/4046
                 try:
@@ -161,7 +204,7 @@ class SmartRedirectHandler(_urllib.request.HTTPRedirectHandler):
                 if not hasattr(result, "read"):
                     def _(self, length=None):
                         try:
-                            retVal = getSafeExString(ex)        # Note: pyflakes mistakenly marks 'ex' as undefined (NOTE: tested in both Python2 and Python3)
+                            retVal = getSafeExString(error)
                         except:
                             retVal = ""
                         return getBytes(retVal)
@@ -186,7 +229,7 @@ class SmartRedirectHandler(_urllib.request.HTTPRedirectHandler):
         result.redurl = getUnicode(redurl) if six.PY3 else redurl
         return result
 
-    http_error_301 = http_error_303 = http_error_307 = http_error_302
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
     def _infinite_loop_check(self, req):
         if hasattr(req, 'redirect_dict') and (req.redirect_dict.get(req.get_full_url(), 0) >= MAX_SINGLE_URL_REDIRECTIONS or len(req.redirect_dict) >= MAX_TOTAL_REDIRECTIONS):

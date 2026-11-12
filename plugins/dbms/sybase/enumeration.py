@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -59,7 +59,7 @@ class Enumeration(GenericEnumeration):
         warnMsg = "on Sybase it is not possible to fetch "
         warnMsg += "database users privileges, sqlmap will check whether "
         warnMsg += "or not the database users are database administrators"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         users = []
         areAdmins = set()
@@ -145,7 +145,7 @@ class Enumeration(GenericEnumeration):
 
         for db in dbs:
             for blind in blinds:
-                query = rootQuery.inband.query % db
+                query = rootQuery.inband.query % ((db,) * 7)
                 retVal = pivotDumpTable("(%s) AS %s" % (query, kb.aliasName), ['%s.name' % kb.aliasName], blind=blind, alias=kb.aliasName)
 
                 if retVal:
@@ -169,7 +169,7 @@ class Enumeration(GenericEnumeration):
                 warnMsg = "missing database parameter. sqlmap is going "
                 warnMsg += "to use the current database to enumerate "
                 warnMsg += "table(s) columns"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
             conf.db = self.getCurrentDb()
 
@@ -265,9 +265,9 @@ class Enumeration(GenericEnumeration):
                 return {conf.db: kb.data.cachedColumns[conf.db]}
 
             if dumpMode and colList:
-                table = {}
-                table[safeSQLIdentificatorNaming(tbl, True)] = dict((_, None) for _ in colList)
-                kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = table
+                if safeSQLIdentificatorNaming(conf.db) not in kb.data.cachedColumns:
+                    kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = {}
+                kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)][safeSQLIdentificatorNaming(tbl, True)] = dict((_, None) for _ in colList)
                 continue
 
             infoMsg = "fetching columns "
@@ -276,7 +276,7 @@ class Enumeration(GenericEnumeration):
             logger.info(infoMsg)
 
             for blind in blinds:
-                query = rootQuery.inband.query % (conf.db, conf.db, conf.db, conf.db, conf.db, conf.db, conf.db, unsafeSQLIdentificatorNaming(tbl))
+                query = rootQuery.inband.query % (conf.db, conf.db, conf.db, conf.db, conf.db, safeSQLIdentificatorNaming(tbl, True))
                 retVal = pivotDumpTable("(%s) AS %s" % (query, kb.aliasName), ['%s.name' % kb.aliasName, '%s.usertype' % kb.aliasName], blind=blind, alias=kb.aliasName)
 
                 if retVal:
@@ -286,8 +286,9 @@ class Enumeration(GenericEnumeration):
                     for name, type_ in filterPairValues(_zip(retVal[0]["%s.name" % kb.aliasName], retVal[0]["%s.usertype" % kb.aliasName])):
                         columns[name] = SYBASE_TYPES.get(int(type_) if hasattr(type_, "isdigit") and type_.isdigit() else type_, type_)
 
-                    table[safeSQLIdentificatorNaming(tbl, True)] = columns
-                    kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = table
+                    if safeSQLIdentificatorNaming(conf.db) not in kb.data.cachedColumns:
+                        kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] = {}
+                    kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)][safeSQLIdentificatorNaming(tbl, True)] = columns
 
                     break
 
@@ -295,32 +296,32 @@ class Enumeration(GenericEnumeration):
 
     def searchDb(self):
         warnMsg = "on Sybase searching of databases is not implemented"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return []
 
     def searchTable(self):
         warnMsg = "on Sybase searching of tables is not implemented"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return []
 
     def searchColumn(self):
         warnMsg = "on Sybase searching of columns is not implemented"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return []
 
     def search(self):
         warnMsg = "on Sybase search option is not available"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     def getHostname(self):
         warnMsg = "on Sybase it is not possible to enumerate the hostname"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     def getStatements(self):
         warnMsg = "on Sybase it is not possible to enumerate the SQL statements"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         return []

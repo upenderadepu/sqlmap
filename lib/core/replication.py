@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import sqlite3
 
+from lib.core.common import cleanReplaceUnicode
 from lib.core.common import getSafeExString
 from lib.core.common import unsafeSQLIdentificatorNaming
 from lib.core.exception import SqlmapConnectionException
@@ -22,8 +23,11 @@ class Replication(object):
     """
 
     def __init__(self, dbpath):
+        self.dbpath = dbpath
+        self.connection = None
+        self.cursor = None
+
         try:
-            self.dbpath = dbpath
             self.connection = sqlite3.connect(dbpath)
             self.connection.isolation_level = None
             self.cursor = self.connection.cursor()
@@ -54,15 +58,15 @@ class Replication(object):
 
         def __init__(self, parent, name, columns=None, create=True, typeless=False):
             self.parent = parent
-            self.name = unsafeSQLIdentificatorNaming(name)
+            self.name = unsafeSQLIdentificatorNaming(name).replace('"', '""')  # Note: escaped for its (double quoted) usage in statements below
             self.columns = columns
             if create:
                 try:
                     self.execute('DROP TABLE IF EXISTS "%s"' % self.name)
                     if not typeless:
-                        self.execute('CREATE TABLE "%s" (%s)' % (self.name, ','.join('"%s" %s' % (unsafeSQLIdentificatorNaming(colname), coltype) for colname, coltype in self.columns)))
+                        self.execute('CREATE TABLE "%s" (%s)' % (self.name, ','.join('"%s" %s' % (unsafeSQLIdentificatorNaming(colname).replace('"', '""'), coltype) for colname, coltype in self.columns)))
                     else:
-                        self.execute('CREATE TABLE "%s" (%s)' % (self.name, ','.join('"%s"' % unsafeSQLIdentificatorNaming(colname) for colname in self.columns)))
+                        self.execute('CREATE TABLE "%s" (%s)' % (self.name, ','.join('"%s"' % unsafeSQLIdentificatorNaming(colname).replace('"', '""') for colname in self.columns)))
                 except Exception as ex:
                     errMsg = "problem occurred ('%s') while initializing the sqlite database " % getSafeExString(ex, UNICODE_ENCODING)
                     errMsg += "located at '%s'" % self.parent.dbpath
@@ -81,7 +85,10 @@ class Replication(object):
 
         def execute(self, sql, parameters=None):
             try:
-                self.parent.cursor.execute(sql, parameters or [])
+                try:
+                    self.parent.cursor.execute(sql, parameters or [])
+                except UnicodeError:
+                    self.parent.cursor.execute(sql, cleanReplaceUnicode(parameters or []))
             except sqlite3.OperationalError as ex:
                 errMsg = "problem occurred ('%s') while accessing sqlite database " % getSafeExString(ex, UNICODE_ENCODING)
                 errMsg += "located at '%s'. Please make sure that " % self.parent.dbpath
@@ -102,10 +109,12 @@ class Replication(object):
             """
             This function is used for selecting row(s) from current table.
             """
-            _ = 'SELECT * FROM %s' % self.name
+            query = 'SELECT * FROM "%s"' % self.name
             if condition:
-                _ += 'WHERE %s' % condition
-            return self.execute(_)
+                query += ' WHERE %s' % condition
+
+            self.execute(query)
+            return self.parent.cursor.fetchall()
 
     def createTable(self, tblname, columns=None, typeless=False):
         """
@@ -114,8 +123,17 @@ class Replication(object):
         return Replication.Table(parent=self, name=tblname, columns=columns, typeless=typeless)
 
     def __del__(self):
-        self.cursor.close()
-        self.connection.close()
+        try:
+            if self.cursor is not None:
+                self.cursor.close()
+        except Exception:
+            pass
+
+        try:
+            if self.connection is not None:
+                self.connection.close()
+        except Exception:
+            pass
 
     # sqlite data types
     NULL = DataType('NULL')

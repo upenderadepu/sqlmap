@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -12,8 +12,13 @@ import sys
 
 from lib.core.common import Backend
 from lib.core.common import dataToStdout
-from lib.core.common import getSQLSnippet
+from lib.core.common import isListLike
 from lib.core.common import isStackingAvailable
+from lib.core.common import joinValue
+from lib.core.common import readCachedFileContent
+from lib.core.common import splitFields
+from lib.core.common import zeroDepthSearch
+from lib.core.compat import xrange
 from lib.core.convert import getUnicode
 from lib.core.data import conf
 from lib.core.data import logger
@@ -41,6 +46,7 @@ class Custom(object):
         sqlType = None
         query = query.rstrip(';')
 
+
         try:
             for sqlTitle, sqlStatements in SQL_STATEMENTS.items():
                 for sqlStatement in sqlStatements:
@@ -61,11 +67,16 @@ class Custom(object):
 
                 output = inject.getValue(query, fromUser=True)
 
+                if sqlType and "SELECT" in sqlType and isListLike(output):
+                    for i in xrange(len(output)):
+                        if isListLike(output[i]):
+                            output[i] = joinValue(output[i])
+
                 return output
-            elif not isStackingAvailable() and not conf.direct:
+            elif not isStackingAvailable() and not conf.direct and not inject.getGadget():
                 warnMsg = "execution of non-query SQL statements is only "
                 warnMsg += "available when stacked queries are supported"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return None
             else:
@@ -80,7 +91,7 @@ class Custom(object):
                 output = NULL
 
         except SqlmapNoneDataException as ex:
-            logger.warn(ex)
+            logger.warning(ex)
 
         return output
 
@@ -98,6 +109,10 @@ class Custom(object):
                 query = _input("sql-shell> ")
                 query = getUnicode(query, encoding=sys.stdin.encoding)
                 query = query.strip("; ")
+            except UnicodeDecodeError:
+                print()
+                errMsg = "invalid user input"
+                logger.error(errMsg)
             except KeyboardInterrupt:
                 print()
                 errMsg = "user aborted"
@@ -135,12 +150,13 @@ class Custom(object):
             if not filename:
                 continue
 
-            snippet = getSQLSnippet(Backend.getDbms(), filename)
+            # User SQL is not a bundled procedure template: preserve literals and percent tokens.
+            snippet = readCachedFileContent(filename)
+            snippet = "\n".join(_ for _ in snippet.split("\n") if not re.match(r"\s*(--|#)", _))  # Note: only whole comment lines (literals stay intact)
+            queries = [_.strip() for _ in splitFields(snippet, delimiter=';' if zeroDepthSearch(snippet, ';') else '\n') if _.strip()]
 
-            if snippet and all(query.strip().upper().startswith("SELECT") for query in (_ for _ in snippet.split(';' if ';' in snippet else '\n') if _)):
-                for query in (_ for _ in snippet.split(';' if ';' in snippet else '\n') if _):
-                    query = query.strip()
-                    if query:
-                        conf.dumper.sqlQuery(query, self.sqlQuery(query))
-            else:
+            if queries and all(query.upper().startswith("SELECT") for query in queries):
+                for query in queries:
+                    conf.dumper.sqlQuery(query, self.sqlQuery(query))
+            elif queries:
                 conf.dumper.sqlQuery(snippet, self.sqlQuery(snippet))

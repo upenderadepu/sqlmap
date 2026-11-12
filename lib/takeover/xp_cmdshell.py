@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -226,8 +226,8 @@ class XP_cmdshell(object):
 
                 if isNumPosStrValue(count):
                     for index in getLimitRange(count):
-                        query = agent.limitQuery(index, query, self.tblField)
-                        output.append(inject.getValue(query, union=False, error=False, resumeValue=False))
+                        limitedQuery = agent.limitQuery(index, query, self.tblField)
+                        output.append(inject.getValue(limitedQuery, union=False, error=False, resumeValue=False))
 
             inject.goStacked("DELETE FROM %s" % self.cmdTblName)
 
@@ -270,7 +270,7 @@ class XP_cmdshell(object):
                         kb.xpCmdshellAvailable = True
 
                     else:
-                        logger.warn("xp_cmdshell re-enabling failed")
+                        logger.warning("xp_cmdshell re-enabling failed")
 
                         logger.info("creating xp_cmdshell with sp_OACreate")
                         self._xpCmdshellConfigure(0)
@@ -283,7 +283,7 @@ class XP_cmdshell(object):
                         else:
                             warnMsg = "xp_cmdshell creation failed, probably "
                             warnMsg += "because sp_OACreate is disabled"
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
             hashDBWrite(HASHDB_KEYS.KB_XP_CMDSHELL_AVAILABLE, kb.xpCmdshellAvailable)
 

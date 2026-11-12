@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -9,17 +9,17 @@ from __future__ import division
 
 import os
 import re
+import subprocess
 import time
 
 from lib.controller.action import action
 from lib.controller.checks import checkConnection
 from lib.controller.checks import checkDynParam
 from lib.controller.checks import checkInternet
+from lib.controller.checks import checkJWT
 from lib.controller.checks import checkNullConnection
-from lib.controller.checks import checkRegexp
 from lib.controller.checks import checkSqlInjection
 from lib.controller.checks import checkStability
-from lib.controller.checks import checkString
 from lib.controller.checks import checkWaf
 from lib.controller.checks import heuristicCheckSqlInjection
 from lib.core.agent import agent
@@ -42,6 +42,7 @@ from lib.core.common import readInput
 from lib.core.common import removePostHintPrefix
 from lib.core.common import safeCSValue
 from lib.core.common import showHttpErrorCodes
+from lib.core.common import singleTimeWarnMessage
 from lib.core.common import urldecode
 from lib.core.common import urlencode
 from lib.core.compat import xrange
@@ -69,13 +70,16 @@ from lib.core.exception import SqlmapValueException
 from lib.core.settings import ASP_NET_CONTROL_REGEX
 from lib.core.settings import CSRF_TOKEN_PARAMETER_INFIXES
 from lib.core.settings import DEFAULT_GET_POST_DELIMITER
+from lib.core.settings import NONSQL_TECHNIQUES
 from lib.core.settings import EMPTY_FORM_FIELDS_REGEX
-from lib.core.settings import GOOGLE_ANALYTICS_COOKIE_PREFIX
+from lib.core.settings import GOOGLE_ANALYTICS_COOKIE_REGEX
+from lib.core.settings import HASHDB_STALE_DAYS
 from lib.core.settings import HOST_ALIASES
 from lib.core.settings import IGNORE_PARAMETERS
 from lib.core.settings import LOW_TEXT_PERCENT
 from lib.core.settings import REFERER_ALIASES
 from lib.core.settings import USER_AGENT_ALIASES
+from lib.core.settings import WAF_BYPASS_MAX_TRIALS
 from lib.core.target import initTargetEnv
 from lib.core.target import setupTargetEnv
 from lib.utils.hash import crackHashFile
@@ -168,6 +172,60 @@ def _formatInjection(inj):
 
     return data
 
+def _autoWafBypass(place, parameter, value):
+    """
+    Automatic WAF/IPS bypass (offered interactively once a WAF/IPS is detected, cached in
+    kb.wafBypass). The request fingerprint has already been neutralized up-front (non-scanner
+    User-Agent, see checkWaf), so here the empirically-ranked candidate tamper scripts are trialled
+    and the first that RESTORES a confirmed injection is adopted. Re-running checkSqlInjection()
+    through a candidate is itself the validation - it succeeds only if the resulting payload both
+    passes the WAF and stays valid SQL, so junk/incompatible candidates are rejected automatically.
+    """
+
+    from lib.utils.wafbypass import candidateTampers, loadTamper
+
+    retVal = None
+
+    savedTamper = kb.tamperFunctions
+    savedTechnique = conf.technique
+    conf.technique = [PAYLOAD.TECHNIQUE.BOOLEAN]    # bound each trial to a quick boolean re-check
+
+    candidates = candidateTampers(identifiedWafs=kb.identifiedWafs)
+
+    try:
+        for count, name in enumerate(candidates):
+            if count >= WAF_BYPASS_MAX_TRIALS:
+                break
+
+            function = loadTamper(name)
+            if function is None:
+                continue
+
+            kb.tamperFunctions = [function]
+            logger.info("trying to bypass the WAF/IPS with tamper script '%s'" % name)
+
+            injection = checkSqlInjection(place, parameter, value)
+            if getattr(injection, "place", None) is not None and NOTE.FALSE_POSITIVE_OR_UNEXPLOITABLE not in injection.notes:
+                logger.info("bypassed the WAF/IPS by using tamper script '%s' (with a non-scanner User-Agent)" % name)
+                logger.info("the same result can be reproduced manually with switch '--random-agent' and tamper script '%s'" % name)
+                retVal = injection
+                return retVal
+
+            if kb.droppingRequests and count >= 2:
+                logger.warning("target keeps dropping requests; giving up on the WAF/IPS bypass")
+                break
+    finally:
+        conf.technique = savedTechnique
+        if retVal is None:      # nothing worked - leave tampering untouched
+            kb.tamperFunctions = savedTamper
+            # honest bail: say it could not be bypassed and what to try manually
+            logger.warning("unable to automatically bypass the WAF/IPS; it might be using behavioral or rate-based detection (consider a manual '--tamper' selection, '--delay', or '--proxy' rotation)")
+
+    return retVal
+
+def _targetInfo():
+    return {"url": conf.url, "query": conf.parameters.get(PLACE.GET), "data": conf.parameters.get(PLACE.POST)}
+
 def _showInjections():
     if conf.wizard and kb.wizardMode:
         kb.wizardMode = False
@@ -179,21 +237,40 @@ def _showInjections():
         header = "sqlmap resumed the following injection point(s) from stored session"
 
     if conf.api:
-        conf.dumper.string("", {"url": conf.url, "query": conf.parameters.get(PLACE.GET), "data": conf.parameters.get(PLACE.POST)}, content_type=CONTENT_TYPE.TARGET)
+        conf.dumper.string("", _targetInfo(), content_type=CONTENT_TYPE.TARGET)
         conf.dumper.string("", kb.injections, content_type=CONTENT_TYPE.TECHNIQUES)
     else:
+        # --report-json: capture the same TECHNIQUES structure the API emits, without printing it (the
+        # human-readable injection points are rendered just below); TARGET is reported per target in start()
+        if conf.reportJson:
+            conf.dumper._reportData(kb.injections, CONTENT_TYPE.TECHNIQUES)
+
         data = "".join(set(_formatInjection(_) for _ in kb.injections)).rstrip("\n")
         conf.dumper.string(header, data)
+
+    # when results were resumed (no test requests this run), nudge if the session file is stale -
+    # this is the common "why is it showing old/unexpected results?" confusion
+    if kb.testQueryCount == 0 and not conf.freshQueries:
+        try:
+            days = int((time.time() - os.path.getmtime(conf.hashDBFile)) / (24 * 3600))
+        except (OSError, IOError, TypeError):
+            days = 0
+
+        if days >= HASHDB_STALE_DAYS:
+            warnMsg = "results above were resumed from a session file last updated %d days ago, " % days
+            warnMsg += "so they may be stale. Rerun with '--flush-session' to retest "
+            warnMsg += "or '--fresh-queries' to ignore cached query results"
+            logger.warning(warnMsg)
 
     if conf.tamper:
         warnMsg = "changes made by tampering scripts are not "
         warnMsg += "included in shown payload content(s)"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     if conf.hpp:
         warnMsg = "changes made by HTTP parameter pollution are not "
         warnMsg += "included in shown payload content(s)"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
 def _randomFillBlankFields(value):
     retVal = value
@@ -300,6 +377,11 @@ def start():
 
     for targetUrl, targetMethod, targetData, targetCookie, targetHeaders in kb.targets:
         targetCount += 1
+
+        # --report-json / REST API: give each target its own taskid in the shared collector, so a multi-target
+        # run (e.g. '-m' bulk file) doesn't have later targets overwrite earlier ones (see _reportData/StdDbOut.write)
+        if conf.reportJson or conf.api:
+            kb.reportTaskId = targetCount
 
         try:
             if conf.checkInternet:
@@ -432,13 +514,26 @@ def start():
                     infoMsg = "testing URL '%s'" % targetUrl
                     logger.info(infoMsg)
 
+            if conf.graphql and PLACE.GET not in conf.parameters:
+                # graphqlScan() is self-contained and operates on the GraphQL
+                # document, not on HTTP parameters. A dummy GET parameter keeps
+                # _setRequestParams() from appending the URI injection marker ('*')
+                # to a bare endpoint URL (which would break detection under
+                # '--batch'); it is discarded by graphqlScan() on entry.
+                conf.parameters[PLACE.GET] = "x"
+
             setupTargetEnv()
 
-            if not checkConnection(suppressOutput=conf.forms) or not checkString() or not checkRegexp():
+            # --report-json: every tested target gets its own group with its identity, also when nothing is found
+            # (otherwise its errors, e.g. connection failures, would have no group to land in)
+            if conf.reportJson:
+                conf.dumper._reportData(_targetInfo(), CONTENT_TYPE.TARGET)
+
+            if not any((conf.graphql,)) and not checkConnection(suppressOutput=conf.forms):
                 continue
 
             if conf.rParam and kb.originalPage:
-                kb.randomPool = dict([_ for _ in kb.randomPool.items() if isinstance(_[1], list)])
+                kb.randomPool = dict(_ for _ in kb.randomPool.items() if isinstance(_[1], list))
 
                 for match in re.finditer(r"(?si)<select[^>]+\bname\s*=\s*[\"']([^\"']+)(.+?)</select>", kb.originalPage):
                     name, _ = match.groups()
@@ -448,13 +543,78 @@ def start():
 
             checkWaf()
 
+            checkJWT()
+
+            if conf.mineParams and not any(conf.get(_) for _ in NONSQL_TECHNIQUES):
+                from lib.utils.paraminer import mineParameters
+                mineParameters()
+
+            if any(conf.get(_) for _ in NONSQL_TECHNIQUES) and (conf.reportJson or conf.resultsFile):
+                singleTimeWarnMessage("'--report-json'/'--results-file' do not (yet) capture non-SQL technique (%s) findings; these are reported on the console only" % '/'.join("--%s" % _ for _ in NONSQL_TECHNIQUES))
+
+            if conf.graphql:
+                from lib.techniques.graphql.inject import graphqlScan
+                graphqlScan()
+                continue
+
+            if conf.nosql:
+                from lib.techniques.nosql.inject import nosqlScan
+                nosqlScan()
+                continue
+
+            if conf.ldap:
+                from lib.techniques.ldap.inject import ldapScan
+                ldapScan()
+                continue
+
+            if conf.xpath:
+                from lib.techniques.xpath.inject import xpathScan
+                xpathScan()
+                continue
+
+            if conf.ssti:
+                from lib.techniques.ssti.inject import sstiScan
+                sstiScan()
+                continue
+
+            if conf.xslt:
+                from lib.techniques.xslt.inject import xsltScan
+                xsltScan()
+                continue
+
+            if conf.xxe:
+                from lib.techniques.xxe.inject import xxeScan
+                xxeScan()
+                continue
+
+            if conf.hql:
+                from lib.techniques.hql.inject import hqlScan
+                hqlScan()
+                continue
+
+            if conf.sparql:
+                from lib.techniques.sparql.inject import sparqlScan
+                sparqlScan()
+                continue
+
+            if conf.odata:
+                from lib.techniques.odata.inject import odataScan
+                odataScan()
+                continue
+
+            if conf.jwt:
+                from lib.techniques.jwt.inject import jwtScan
+                jwtScan()
+                continue
+
             if conf.nullConnection:
                 checkNullConnection()
 
             if (len(kb.injections) == 0 or (len(kb.injections) == 1 and kb.injections[0].place is None)) and (kb.injection.place is None or kb.injection.parameter is None):
-                if not any((conf.string, conf.notString, conf.regexp)) and PAYLOAD.TECHNIQUE.BOOLEAN in conf.technique:
-                    # NOTE: this is not needed anymore, leaving only to display
-                    # a warning message to the user in case the page is not stable
+                if not any((conf.string, conf.notString, conf.regexp)) and any(_ in conf.technique for _ in (PAYLOAD.TECHNIQUE.BOOLEAN, PAYLOAD.TECHNIQUE.UNION)):
+                    # NOTE: besides the not-stable warning, this marks dynamic content for removal, which
+                    # UNION column-count detection relies on too (it compares pages) - so it must run when
+                    # UNION is tested even if BOOLEAN is excluded (e.g. '--technique=U' on a dynamic page)
                     checkStability()
 
                 # Do a little prioritization reorder of a testable parameter list
@@ -476,7 +636,7 @@ def start():
                     skip |= (place == PLACE.REFERER and (kb.testOnlyCustom or conf.level < 3))
 
                     # --param-filter
-                    skip |= (len(conf.paramFilter) > 0 and place.upper() not in conf.paramFilter)
+                    skip |= (len(conf.paramFilter) > 0 and place.upper() not in conf.paramFilter and place.upper().replace("(CUSTOM) ", "") not in conf.paramFilter)  # Note: e.g. POST for JSON/XML (i.e. '(custom) POST') too
 
                     # Test Host header only if
                     # --level >= 5
@@ -498,7 +658,7 @@ def start():
                     if skip:
                         continue
 
-                    if place not in conf.paramDict:
+                    if place not in conf.paramDict or place not in conf.parameters:
                         continue
 
                     paramDict = conf.paramDict[place]
@@ -512,6 +672,23 @@ def start():
                         kb.vainRun = False
                         testSqlInj = True
                         paramKey = (conf.hostname, conf.path, place, parameter)
+
+                        if kb.processUserMarks:
+                            if testSqlInj and place not in (PLACE.CUSTOM_POST, PLACE.CUSTOM_HEADER, PLACE.URI):
+                                if kb.processNonCustom is None:
+                                    message = "other non-custom parameters found. "
+                                    message += "Do you want to process them too? [Y/n/q] "
+                                    choice = readInput(message, default='Y').upper()
+
+                                    if choice == 'Q':
+                                        raise SqlmapUserQuitException
+                                    else:
+                                        kb.processNonCustom = choice == 'Y'
+
+                                if not kb.processNonCustom:
+                                    infoMsg = "skipping %sparameter '%s'" % ("%s " % paramType if paramType != parameter else "", parameter)
+                                    logger.info(infoMsg)
+                                    continue
 
                         if paramKey in kb.testedParams:
                             testSqlInj = False
@@ -534,7 +711,7 @@ def start():
                             infoMsg = "skipping %sparameter '%s'" % ("%s " % paramType if paramType != parameter else "", parameter)
                             logger.info(infoMsg)
 
-                        elif conf.paramExclude and (re.search(conf.paramExclude, parameter, re.I) or kb.postHint and re.search(conf.paramExclude, parameter.split(' ')[-1], re.I)):
+                        elif conf.paramExclude and (re.search(conf.paramExclude, parameter, re.I) or kb.postHint and re.search(conf.paramExclude, parameter.split(' ')[-1], re.I) or re.search(r"\A(?:%s)\Z" % conf.paramExclude, place, re.I)):  # Note: place (e.g. 'Cookie') has to be fully matched (e.g. 'ge' must not exclude 'GET')
                             testSqlInj = False
 
                             infoMsg = "skipping %sparameter '%s'" % ("%s " % paramType if paramType != parameter else "", parameter)
@@ -547,7 +724,7 @@ def start():
                             logger.info(infoMsg)
 
                         # Ignore session-like parameters for --level < 4
-                        elif conf.level < 4 and (parameter.upper() in IGNORE_PARAMETERS or any(_ in parameter.lower() for _ in CSRF_TOKEN_PARAMETER_INFIXES) or parameter.upper().startswith(GOOGLE_ANALYTICS_COOKIE_PREFIX)):
+                        elif conf.level < 4 and (parameter.upper() in IGNORE_PARAMETERS or any(_ in parameter.lower() for _ in CSRF_TOKEN_PARAMETER_INFIXES) or re.search(GOOGLE_ANALYTICS_COOKIE_REGEX, parameter)):
                             testSqlInj = False
 
                             infoMsg = "ignoring %sparameter '%s'" % ("%s " % paramType if paramType != parameter else "", parameter)
@@ -558,7 +735,7 @@ def start():
 
                             if not check:
                                 warnMsg = "%sparameter '%s' does not appear to be dynamic" % ("%s " % paramType if paramType != parameter else "", parameter)
-                                logger.warn(warnMsg)
+                                logger.warning(warnMsg)
 
                                 if conf.skipStatic:
                                     infoMsg = "skipping static %sparameter '%s'" % ("%s " % paramType if paramType != parameter else "", parameter)
@@ -589,6 +766,14 @@ def start():
                                 logger.info(infoMsg)
 
                                 injection = checkSqlInjection(place, parameter, value)
+
+                                # WAF/IPS bypass accepted: the parameter looks injectable (heuristics) but
+                                # the standard payloads were blocked -> try to auto-bypass it (request
+                                # fingerprint neutralization and/or a tamper script)
+                                if getattr(injection, "place", None) is None and kb.wafBypass and check == HEURISTIC_TEST.POSITIVE \
+                                   and not conf.tamper and not kb.tamperFunctions:
+                                    injection = _autoWafBypass(place, parameter, value) or injection
+
                                 proceed = not kb.endDetection
                                 injectable = False
 
@@ -599,6 +784,19 @@ def start():
                                         injectable = True
 
                                         kb.injections.append(injection)
+
+                                        if not kb.alerted:
+                                            if conf.alert:
+                                                infoMsg = "executing alerting shell command(s) ('%s')" % conf.alert
+                                                logger.info(infoMsg)
+                                                try:
+                                                    process = subprocess.Popen(conf.alert, shell=True)
+                                                    process.wait()
+                                                except Exception as ex:
+                                                    errMsg = "error occurred while executing '%s' ('%s')" % (conf.alert, getSafeExString(ex))
+                                                    logger.error(errMsg)
+
+                                            kb.alerted = True
 
                                         # In case when user wants to end detection phase (Ctrl+C)
                                         if not proceed:
@@ -614,7 +812,7 @@ def start():
 
                                 if not injectable:
                                     warnMsg = "%sparameter '%s' does not seem to be injectable" % ("%s " % paramType if paramType != parameter else "", parameter)
-                                    logger.warn(warnMsg)
+                                    logger.warning(warnMsg)
 
                             finally:
                                 if place == PLACE.COOKIE:
@@ -675,9 +873,13 @@ def start():
                         errMsg += "does not match exclusively True responses."
 
                     if not conf.tamper:
-                        errMsg += " If you suspect that there is some kind of protection mechanism "
-                        errMsg += "involved (e.g. WAF) maybe you could try to use "
-                        errMsg += "option '--tamper' (e.g. '--tamper=space2comment')"
+                        if kb.identifiedWafs:
+                            errMsg += " As a WAF/IPS ('%s') was identified during the run, " % ", ".join(kb.identifiedWafs)
+                            errMsg += "you are strongly advised to retry with option '--tamper' (e.g. '--tamper=space2comment')"
+                        else:
+                            errMsg += " If you suspect that there is some kind of protection mechanism "
+                            errMsg += "involved (e.g. WAF) maybe you could try to use "
+                            errMsg += "option '--tamper' (e.g. '--tamper=space2comment')"
 
                         if not conf.randomAgent:
                             errMsg += " and/or switch '--random-agent'"
@@ -700,7 +902,12 @@ def start():
                     condition = True
 
                 if condition:
-                    action()
+                    try:
+                        action()
+                    finally:
+                        if conf.proof:
+                            from lib.utils.prove import proveExploitation
+                            proveExploitation()
 
         except KeyboardInterrupt:
             if kb.lastCtrlCTime and (time.time() - kb.lastCtrlCTime < 1):
@@ -711,7 +918,7 @@ def start():
 
             if conf.multipleTargets:
                 warnMsg = "user aborted in multiple target mode"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 message = "do you want to skip to the next target in list? [Y/n/q]"
                 choice = readInput(message, default='Y').upper()
@@ -751,7 +958,7 @@ def start():
                 warnMsg = "it appears that the target "
                 warnMsg += "has a maximum connections "
                 warnMsg += "constraint"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
     if kb.dataOutputFlag and not conf.multipleTargets:
         logger.info("fetched data logged to text files under '%s'" % conf.outputPath)

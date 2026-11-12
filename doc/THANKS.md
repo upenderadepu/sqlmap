@@ -109,6 +109,9 @@ Alessandro Curio, <alessandro.curio(at)gmail.com>
 Alessio Dalla Piazza, <alessio.dallapiazza(at)gmail.com>
 * for reporting a couple of bugs
 
+Alexis Danizan, <alexis.danizan(at)synacktiv.com>
+* for contributing support for ClickHouse
+
 Sherif El-Deeb, <archeldeeb(at)gmail.com>
 * for reporting a minor bug
 
@@ -172,7 +175,7 @@ Ivan Giacomelli, <truemilk(at)insiberia.net>
 * for reviewing the documentation
 
 Dimitris Giannitsaros, <daremon(at)gmail.com>
-* for contributing a REST-JSON API client
+* for contributing a REST API client
 
 Nico Golde, <nico(at)ngolde.de>
 * for reporting a couple of bugs
@@ -190,9 +193,6 @@ Dan Guido, <dguido(at)gmail.com>
 David Guimaraes, <skysbsb(at)gmail.com>
 * for reporting considerable amount of bugs
 * for suggesting several features
-
-Chris Hall, <chris.hall(at)mod10.net>
-* for coding the prettyprint.py library
 
 Tate Hansen, <tate(at)clearnetsec.com>
 * for donating to sqlmap development
@@ -532,6 +532,9 @@ Duarte Silva <duarte.silva(at)serializing.me>
 M Simkin, <mlsimkin(at)cox.net>
 * for suggesting a feature
 
+Tanaydin Sirin, <tanaydinsirin(at)gmail.com>
+* for implementation of ncurses TUI (switch --tui)
+
 Konrads Smelkovs, <konrads(at)smelkovs.com>
 * for reporting a few bugs in --sql-shell and --sql-query on Microsoft SQL Server
 
@@ -619,6 +622,9 @@ Thierry Zoller, <thierry(at)zoller.lu>
 
 Zhen Zhou, <zhouzhenster(at)gmail.com>
 * for suggesting a feature
+
+Zakaria Zoulati, <https://github.com/zakaria-zoulati>
+* for contributing SAP HANA support
 
 -insane-, <insane_(at)gmx.de>
 * for reporting a minor bug

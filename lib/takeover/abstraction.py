@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -52,11 +52,17 @@ class Abstraction(Web, UDF, XP_cmdshell):
         elif self.webBackdoorUrl and (not isStackingAvailable() or kb.udfFail):
             self.webBackdoorRunCmd(cmd)
 
+        elif Backend.isDbms(DBMS.PGSQL) and self.checkPlExec():
+            self.plExecCmd(cmd, silent=silent)
+
         elif Backend.getIdentifiedDbms() in (DBMS.MYSQL, DBMS.PGSQL):
             self.udfExecCmd(cmd, silent=silent)
 
         elif Backend.isDbms(DBMS.MSSQL):
             self.xpCmdshellExecCmd(cmd, silent=silent)
+
+        elif Backend.isDbms(DBMS.H2):
+            self.h2ExecCmd(cmd, silent=silent)
 
         else:
             errMsg = "Feature not yet implemented for the back-end DBMS"
@@ -71,11 +77,17 @@ class Abstraction(Web, UDF, XP_cmdshell):
         elif self.webBackdoorUrl and (not isStackingAvailable() or kb.udfFail):
             retVal = self.webBackdoorRunCmd(cmd)
 
+        elif Backend.isDbms(DBMS.PGSQL) and self.checkPlExec():
+            retVal = self.plExecCmd(cmd)
+
         elif Backend.getIdentifiedDbms() in (DBMS.MYSQL, DBMS.PGSQL):
             retVal = self.udfEvalCmd(cmd, first, last)
 
         elif Backend.isDbms(DBMS.MSSQL):
             retVal = self.xpCmdshellEvalCmd(cmd, first, last)
+
+        elif Backend.isDbms(DBMS.H2):
+            retVal = self.h2EvalCmd(cmd, first, last)
 
         else:
             errMsg = "Feature not yet implemented for the back-end DBMS"
@@ -143,6 +155,8 @@ class Abstraction(Web, UDF, XP_cmdshell):
             try:
                 command = _input("os-shell> ")
                 command = getUnicode(command, encoding=sys.stdin.encoding)
+            except UnicodeDecodeError:
+                pass
             except KeyboardInterrupt:
                 print()
                 errMsg = "user aborted"
@@ -211,9 +225,9 @@ class Abstraction(Web, UDF, XP_cmdshell):
                     warnMsg += "were able to extract and crack a DBA "
                     warnMsg += "password by any mean"
 
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
-            if any((conf.osCmd, conf.osShell)) and Backend.isDbms(DBMS.PGSQL) and self.checkCopyExec():
+            if any((conf.osCmd, conf.osShell)) and Backend.isDbms(DBMS.PGSQL) and (self.checkCopyExec() or self.checkPlExec()):
                 success = True
             elif Backend.getIdentifiedDbms() in (DBMS.MYSQL, DBMS.PGSQL):
                 success = self.udfInjectSys()

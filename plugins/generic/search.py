@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -119,7 +119,7 @@ class Search(object):
                     if dbConsider == "1":
                         warnMsg += "s LIKE"
                     warnMsg += " '%s' found" % unsafeSQLIdentificatorNaming(db)
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
                     continue
 
@@ -135,8 +135,9 @@ class Search(object):
                     query = agent.limitQuery(index, query, dbCond)
 
                     value = unArrayizeValue(inject.getValue(query, union=False, error=False))
-                    value = safeSQLIdentificatorNaming(value)
-                    foundDbs.append(value)
+                    if not isNoneValue(value):  # guard (mirrors searchTable) so a failed retrieval can't push a None/garbage name
+                        value = safeSQLIdentificatorNaming(value)
+                        foundDbs.append(value)
 
         conf.dumper.lister("found databases", foundDbs)
 
@@ -249,7 +250,7 @@ class Search(object):
                             if tblConsider == "1":
                                 warnMsg += "s LIKE"
                             warnMsg += " '%s'" % unsafeSQLIdentificatorNaming(tbl)
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
                             continue
 
@@ -278,7 +279,7 @@ class Search(object):
                                 foundTbls[db] = []
                 else:
                     dbName = "SQLite" if Backend.isDbms(DBMS.SQLITE) else "Firebird"
-                    foundTbls["%s%s" % (dbName, METADB_SUFFIX)] = []
+                    foundTbls.setdefault("%s%s" % (dbName, METADB_SUFFIX), [])  # Note: keeping matches of previous tables (e.g. -T users,nonexist)
 
                 for db in foundTbls:
                     db = safeSQLIdentificatorNaming(db)
@@ -302,7 +303,7 @@ class Search(object):
                             warnMsg += "s LIKE"
                         warnMsg += " '%s' " % unsafeSQLIdentificatorNaming(tbl)
                         warnMsg += "in database '%s'" % unsafeSQLIdentificatorNaming(db)
-                        logger.warn(warnMsg)
+                        logger.warning(warnMsg)
 
                         continue
 
@@ -339,7 +340,7 @@ class Search(object):
 
         if not foundTbls:
             warnMsg = "no databases contain any of the provided tables"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
             return
 
         conf.dumper.dbTables(foundTbls)
@@ -507,7 +508,7 @@ class Search(object):
                         if colConsider == "1":
                             warnMsg += "s LIKE"
                         warnMsg += " '%s'" % unsafeSQLIdentificatorNaming(column)
-                        logger.warn("%s%s" % (warnMsg, infoMsgTbl))
+                        logger.warning("%s%s" % (warnMsg, infoMsgTbl))
 
                         continue
 
@@ -535,7 +536,10 @@ class Search(object):
                 origDb = conf.db
                 origTbl = conf.tbl
 
-                for column, dbData in foundCols.items():
+                # Note: only the current column - foundCols also holds columns from earlier
+                # colList iterations, and re-walking them here re-issued their table lookups
+                # (O(n^2) blind requests) and duplicated their found tables
+                for column, dbData in ((column, foundCols[column]),):
                     colQuery = "%s%s" % (colCond, colCondParam)
                     colQuery = colQuery % unsafeSQLIdentificatorNaming(column)
 
@@ -566,7 +570,7 @@ class Search(object):
                                 warnMsg += "s LIKE"
                             warnMsg += " '%s' " % unsafeSQLIdentificatorNaming(column)
                             warnMsg += "in database '%s'" % unsafeSQLIdentificatorNaming(db)
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
                             continue
 
@@ -620,7 +624,7 @@ class Search(object):
         else:
             warnMsg = "no databases have tables containing any of the "
             warnMsg += "provided columns"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
     def search(self):
         if Backend.getIdentifiedDbms() in UPPER_CASE_DBMSES:

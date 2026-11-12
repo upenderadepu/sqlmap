@@ -1,25 +1,30 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
+
+_readline = None
+try:
+    import readline as _readline
+except:
+    try:
+        import pyreadline as _readline
+    except:
+        pass
+
+if _readline:
+    _symbols = getattr(_readline, "__all__", None)
+    if _symbols is None:
+        _symbols = (name for name in dir(_readline) if not name.startswith("_"))
+
+    for _symbol in _symbols:
+        globals()[_symbol] = getattr(_readline, _symbol)
 
 from lib.core.data import logger
 from lib.core.settings import IS_WIN
 from lib.core.settings import PLATFORM
-
-_readline = None
-
-try:
-    from readline import *
-    import readline as _readline
-except:
-    try:
-        from pyreadline import *
-        import pyreadline as _readline
-    except:
-        pass
 
 if IS_WIN and _readline:
     try:

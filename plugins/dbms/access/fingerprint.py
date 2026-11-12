@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -162,11 +162,11 @@ class Fingerprint(GenericFingerprint):
             infoMsg = "confirming %s" % DBMS.ACCESS
             logger.info(infoMsg)
 
-            result = inject.checkBooleanExpression("IIF(ATN(2)>0,1,0) BETWEEN 2 AND 0")
+            result = inject.checkBooleanExpression("IIF(ATN(2) IS NOT NULL,1,0) BETWEEN 2 AND 0")
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.ACCESS
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
                 return False
 
             setDbms(DBMS.ACCESS)
@@ -185,7 +185,7 @@ class Fingerprint(GenericFingerprint):
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.ACCESS
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False
 

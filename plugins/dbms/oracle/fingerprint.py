@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -9,10 +9,14 @@ import re
 
 from lib.core.common import Backend
 from lib.core.common import Format
+from lib.core.common import hashDBRetrieve
+from lib.core.common import hashDBWrite
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
 from lib.core.enums import DBMS
+from lib.core.enums import FORK
+from lib.core.enums import HASHDB_KEYS
 from lib.core.session import setDbms
 from lib.core.settings import ORACLE_ALIASES
 from lib.request import inject
@@ -23,6 +27,16 @@ class Fingerprint(GenericFingerprint):
         GenericFingerprint.__init__(self, DBMS.ORACLE)
 
     def getFingerprint(self):
+        fork = hashDBRetrieve(HASHDB_KEYS.DBMS_FORK)
+
+        if fork is None:
+            if inject.checkBooleanExpression("NULL_EQU(NULL,NULL)=1"):
+                fork = FORK.DM8
+            else:
+                fork = ""
+
+            hashDBWrite(HASHDB_KEYS.DBMS_FORK, fork)
+
         value = ""
         wsOsFp = Format.getOs("web server", kb.headersFp)
 
@@ -39,6 +53,8 @@ class Fingerprint(GenericFingerprint):
 
         if not conf.extensiveFp:
             value += DBMS.ORACLE
+            if fork:
+                value += " (%s fork)" % fork
             return value
 
         actVer = Format.getDbms()
@@ -56,6 +72,9 @@ class Fingerprint(GenericFingerprint):
 
         if htmlErrorFp:
             value += "\n%shtml error message fingerprint: %s" % (blank, htmlErrorFp)
+
+        if fork:
+            value += "\n%sfork fingerprint: %s" % (blank, fork)
 
         return value
 
@@ -90,7 +109,7 @@ class Fingerprint(GenericFingerprint):
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.ORACLE
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return False
 
@@ -105,9 +124,10 @@ class Fingerprint(GenericFingerprint):
             logger.info(infoMsg)
 
             # Reference: https://en.wikipedia.org/wiki/Oracle_Database
-            for version in ("21c", "19c", "18c", "12c", "11g", "10g", "9i", "8i", "7"):
+            for version in ("23c", "21c", "19c", "18c", "12c", "11g", "10g", "9i", "8i", "7"):
                 number = int(re.search(r"([\d]+)", version).group(1))
-                output = inject.checkBooleanExpression("%d=(SELECT SUBSTR((VERSION),1,%d) FROM SYS.PRODUCT_COMPONENT_VERSION WHERE ROWNUM=1)" % (number, 1 if number < 10 else 2))
+                # Note: prefix matching instead of the blacklisted SUBSTR()
+                output = inject.checkBooleanExpression("(SELECT VERSION FROM SYS.PRODUCT_COMPONENT_VERSION WHERE ROWNUM=1) LIKE '%d%%'" % number)
 
                 if output:
                     Backend.setVersion(version)
@@ -116,7 +136,7 @@ class Fingerprint(GenericFingerprint):
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.ORACLE
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False
 

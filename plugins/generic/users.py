@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -13,6 +13,7 @@ from lib.core.common import Backend
 from lib.core.common import filterPairValues
 from lib.core.common import getLimitRange
 from lib.core.common import isAdminFromPrivileges
+from lib.core.common import isDBMSVersionAtLeast
 from lib.core.common import isInferenceAvailable
 from lib.core.common import isNoneValue
 from lib.core.common import isNullValue
@@ -104,6 +105,7 @@ class Users(object):
 
         condition = (Backend.isDbms(DBMS.MSSQL) and Backend.isVersionWithin(("2005", "2008")))
         condition |= (Backend.isDbms(DBMS.MYSQL) and not kb.data.has_information_schema)
+        condition |= (Backend.isDbms(DBMS.H2) and not isDBMSVersionAtLeast("2"))
 
         if any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct:
             if Backend.isDbms(DBMS.MYSQL) and Backend.isFork(FORK.DRIZZLE):
@@ -202,8 +204,8 @@ class Users(object):
             condition = rootQuery.inband.condition
 
             if conf.user:
-                query += " WHERE "
-                query += " OR ".join("%s = '%s'" % (condition, user) for user in sorted(users))
+                userCondition = " OR ".join("%s = '%s'" % (condition, user) for user in sorted(users))
+                query += " %s (%s)" % ("AND" if re.search(r"(?i)\bWHERE\b", query) else "WHERE", userCondition)
 
             if Backend.isDbms(DBMS.SYBASE):
                 getCurrentThreadData().disableStdOut = True
@@ -301,7 +303,7 @@ class Users(object):
                         if not isNumPosStrValue(count):
                             warnMsg = "unable to retrieve the number of password "
                             warnMsg += "hashes for user '%s'" % user
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
                             continue
 
                     infoMsg = "fetching password hashes for user '%s'" % user
@@ -325,7 +327,7 @@ class Users(object):
                         elif Backend.getIdentifiedDbms() in (DBMS.INFORMIX, DBMS.VIRTUOSO):
                             query = rootQuery.blind.query % (user,)
 
-                        elif Backend.isDbms(DBMS.HSQLDB):
+                        elif Backend.getIdentifiedDbms() in (DBMS.HSQLDB, DBMS.FRONTBASE):
                             query = rootQuery.blind.query % (index, user)
 
                         else:
@@ -345,7 +347,7 @@ class Users(object):
                     else:
                         warnMsg = "unable to retrieve the password "
                         warnMsg += "hashes for user '%s'" % user
-                        logger.warn(warnMsg)
+                        logger.warning(warnMsg)
 
                     retrievedUsers.add(user)
 
@@ -403,7 +405,7 @@ class Users(object):
         # Set containing the list of DBMS administrators
         areAdmins = set()
 
-        if not kb.data.cachedUsersPrivileges and any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct:
+        if not kb.data.cachedUsersPrivileges and (any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct):
             if Backend.isDbms(DBMS.MYSQL) and not kb.data.has_information_schema:
                 query = rootQuery.inband.query2
                 condition = rootQuery.inband.condition2
@@ -415,12 +417,12 @@ class Users(object):
                 condition = rootQuery.inband.condition
 
             if conf.user:
-                query += " WHERE "
-
                 if Backend.isDbms(DBMS.MYSQL) and kb.data.has_information_schema:
-                    query += " OR ".join("%s LIKE '%%%s%%'" % (condition, user) for user in sorted(users))
+                    userCondition = " OR ".join("%s LIKE '%%%s%%'" % (condition, user) for user in sorted(users))
                 else:
-                    query += " OR ".join("%s = '%s'" % (condition, user) for user in sorted(users))
+                    userCondition = " OR ".join("%s = '%s'" % (condition, user) for user in sorted(users))
+
+                query += " %s (%s)" % ("AND" if re.search(r"(?i)\bWHERE\b", query) else "WHERE", userCondition)
 
             values = inject.getValue(query, blind=False, time=False)
 
@@ -455,7 +457,7 @@ class Users(object):
 
                             # In MySQL >= 5.0 and Oracle we get the list
                             # of privileges as string
-                            elif Backend.isDbms(DBMS.ORACLE) or (Backend.isDbms(DBMS.MYSQL) and kb.data.has_information_schema) or Backend.getIdentifiedDbms() in (DBMS.VERTICA, DBMS.MIMERSQL, DBMS.CUBRID):
+                            elif Backend.isDbms(DBMS.ORACLE) or (Backend.isDbms(DBMS.MYSQL) and kb.data.has_information_schema) or Backend.getIdentifiedDbms() in (DBMS.VERTICA, DBMS.MIMERSQL, DBMS.CUBRID, DBMS.SNOWFLAKE, DBMS.CLICKHOUSE, DBMS.CRATEDB, DBMS.ALTIBASE):
                                 privileges.add(privilege)
 
                             # In MySQL < 5.0 we get Y if the privilege is
@@ -547,7 +549,7 @@ class Users(object):
 
                         warnMsg = "unable to retrieve the number of "
                         warnMsg += "privileges for user '%s'" % outuser
-                        logger.warn(warnMsg)
+                        logger.warning(warnMsg)
                         continue
 
                 infoMsg = "fetching privileges for user '%s'" % outuser
@@ -592,7 +594,7 @@ class Users(object):
 
                     # In MySQL >= 5.0 and Oracle we get the list
                     # of privileges as string
-                    elif Backend.isDbms(DBMS.ORACLE) or (Backend.isDbms(DBMS.MYSQL) and kb.data.has_information_schema) or Backend.getIdentifiedDbms() in (DBMS.VERTICA, DBMS.MIMERSQL, DBMS.CUBRID):
+                    elif Backend.isDbms(DBMS.ORACLE) or (Backend.isDbms(DBMS.MYSQL) and kb.data.has_information_schema) or Backend.getIdentifiedDbms() in (DBMS.VERTICA, DBMS.MIMERSQL, DBMS.CUBRID, DBMS.SNOWFLAKE, DBMS.CLICKHOUSE, DBMS.CRATEDB, DBMS.ALTIBASE):
                         privileges.add(privilege)
 
                     # In MySQL < 5.0 we get Y if the privilege is
@@ -625,17 +627,18 @@ class Users(object):
                     elif Backend.isDbms(DBMS.DB2):
                         privs = privilege.split(',')
                         privilege = privs[0]
-                        privs = privs[1]
-                        privs = list(privs.strip())
-                        i = 1
+                        if len(privs) > 1:  # guard a comma-less privilege value (mirrors the inband path)
+                            privs = privs[1]
+                            privs = list(privs.strip())
+                            i = 1
 
-                        for priv in privs:
-                            if priv.upper() in ('Y', 'G'):
-                                for position, db2Priv in DB2_PRIVS.items():
-                                    if position == i:
-                                        privilege += ", " + db2Priv
+                            for priv in privs:
+                                if priv.upper() in ('Y', 'G'):
+                                    for position, db2Priv in DB2_PRIVS.items():
+                                        if position == i:
+                                            privilege += ", " + db2Priv
 
-                            i += 1
+                                i += 1
 
                         privileges.add(privilege)
 
@@ -646,13 +649,16 @@ class Users(object):
                         break
 
                 if privileges:
-                    kb.data.cachedUsersPrivileges[user] = list(privileges)
+                    # Note: 'user' may be a LIKE-wrapped form (e.g. '%root%') built for the MySQL
+                    # query above; key/record under the real name so the output isn't mislabelled
+                    # (and the retrievedUsers de-dup check, which compares the unwrapped name, works)
+                    kb.data.cachedUsersPrivileges[outuser] = list(privileges)
                 else:
                     warnMsg = "unable to retrieve the privileges "
                     warnMsg += "for user '%s'" % outuser
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
-                retrievedUsers.add(user)
+                retrievedUsers.add(outuser)
 
         if not kb.data.cachedUsersPrivileges:
             errMsg = "unable to retrieve the privileges "
@@ -666,8 +672,8 @@ class Users(object):
         return (kb.data.cachedUsersPrivileges, areAdmins)
 
     def getRoles(self, query2=False):
-        warnMsg = "on %s the concept of roles does not " % Backend.getIdentifiedDbms()
-        warnMsg += "exist. sqlmap will enumerate privileges instead"
-        logger.warn(warnMsg)
+        warnMsg = "enumeration of roles is not supported on %s; " % Backend.getIdentifiedDbms()
+        warnMsg += "sqlmap will enumerate privileges instead"
+        logger.warning(warnMsg)
 
         return self.getPrivileges(query2)

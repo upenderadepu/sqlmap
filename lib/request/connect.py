@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import binascii
+import calendar
+import email.utils
 import inspect
+import io
 import logging
 import os
 import random
@@ -18,12 +21,9 @@ import sys
 import time
 import traceback
 
-try:
-    import websocket
-    from websocket import WebSocketException
-except ImportError:
-    class WebSocketException(Exception):
-        pass
+from lib.request import websocket
+from lib.request import authrefresh
+from lib.request.websocket import WebSocketException
 
 from lib.core.agent import agent
 from lib.core.common import asciifyUrl
@@ -46,6 +46,7 @@ from lib.core.common import getSafeExString
 from lib.core.common import logHTTPTraffic
 from lib.core.common import openFile
 from lib.core.common import popValue
+from lib.core.common import parseJson
 from lib.core.common import pushValue
 from lib.core.common import randomizeParameterValue
 from lib.core.common import randomInt
@@ -56,12 +57,14 @@ from lib.core.common import safeVariableNaming
 from lib.core.common import singleTimeLogMessage
 from lib.core.common import singleTimeWarnMessage
 from lib.core.common import stdev
+from lib.core.common import unArrayizeValue
 from lib.core.common import unsafeVariableNaming
 from lib.core.common import urldecode
 from lib.core.common import urlencode
 from lib.core.common import wasLastResponseDelayed
 from lib.core.compat import patchHeaders
 from lib.core.compat import xrange
+from lib.core.convert import encodeBase64
 from lib.core.convert import getBytes
 from lib.core.convert import getText
 from lib.core.convert import getUnicode
@@ -87,6 +90,7 @@ from lib.core.enums import WEB_PLATFORM
 from lib.core.exception import SqlmapCompressionException
 from lib.core.exception import SqlmapConnectionException
 from lib.core.exception import SqlmapGenericException
+from lib.core.exception import SqlmapMissingDependence
 from lib.core.exception import SqlmapSkipTargetException
 from lib.core.exception import SqlmapSyntaxException
 from lib.core.exception import SqlmapTokenException
@@ -99,6 +103,7 @@ from lib.core.settings import DEFAULT_GET_POST_DELIMITER
 from lib.core.settings import DEFAULT_USER_AGENT
 from lib.core.settings import EVALCODE_ENCODED_PREFIX
 from lib.core.settings import HTTP_ACCEPT_ENCODING_HEADER_VALUE
+from lib.core.settings import HTTP_ZSTD_AVAILABLE
 from lib.core.settings import HTTP_ACCEPT_HEADER_VALUE
 from lib.core.settings import IPS_WAF_CHECK_PAYLOAD
 from lib.core.settings import IS_WIN
@@ -109,7 +114,10 @@ from lib.core.settings import MAX_CONNECTION_READ_SIZE
 from lib.core.settings import MAX_CONNECTIONS_REGEX
 from lib.core.settings import MAX_CONNECTION_TOTAL_SIZE
 from lib.core.settings import MAX_CONSECUTIVE_CONNECTION_ERRORS
-from lib.core.settings import MAX_MURPHY_SLEEP_TIME
+from lib.core.settings import MAX_JITTER_SPIKE_TIME
+from lib.core.settings import JITTER_SIGMAS
+from lib.core.settings import JITTER_SPIKE_CHANCE
+from lib.core.settings import JITTER_JUNK_RESPONSES
 from lib.core.settings import META_REFRESH_REGEX
 from lib.core.settings import MAX_TIME_RESPONSES
 from lib.core.settings import MIN_TIME_RESPONSES
@@ -118,8 +126,13 @@ from lib.core.settings import PERMISSION_DENIED_REGEX
 from lib.core.settings import PLAIN_TEXT_CONTENT_TYPE
 from lib.core.settings import RANDOM_INTEGER_MARKER
 from lib.core.settings import RANDOM_STRING_MARKER
+from lib.core.settings import RATE_LIMIT_DEFAULT_DELAY
+from lib.core.settings import RATE_LIMIT_DELAY_STEP
+from lib.core.settings import RATE_LIMIT_MAX_DELAY
 from lib.core.settings import REPLACEMENT_MARKER
+from lib.core.settings import SAFE_HEX_MARKER
 from lib.core.settings import TEXT_CONTENT_TYPE_REGEX
+from lib.core.settings import TOO_MANY_REQUESTS_HTTP_CODE
 from lib.core.settings import UNENCODED_ORIGINAL_VALUE
 from lib.core.settings import UNICODE_ENCODING
 from lib.core.settings import URI_HTTP_HEADER
@@ -132,9 +145,12 @@ from lib.request.basic import processResponse
 from lib.request.comparison import comparison
 from lib.request.direct import direct
 from lib.request.methodrequest import MethodRequest
+from lib.utils.grpcweb import decodeResponse as grpcDecodeResponse
+from lib.utils.grpcweb import encodeBody as grpcEncodeBody
 from lib.utils.safe2bin import safecharencode
+from lib.utils.sqllint import checkSanity
 from thirdparty import six
-from thirdparty.odict import OrderedDict
+from collections import OrderedDict
 from thirdparty.six import unichr as _unichr
 from thirdparty.six.moves import http_client as _http_client
 from thirdparty.six.moves import urllib as _urllib
@@ -147,9 +163,12 @@ class Connect(object):
 
     @staticmethod
     def _getPageProxy(**kwargs):
-        if (len(inspect.stack()) > sys.getrecursionlimit() // 2):   # Note: https://github.com/sqlmapproject/sqlmap/issues/4525
-            warnMsg = "unable to connect to the target URL"
-            raise SqlmapConnectionException(warnMsg)
+        try:
+            if (len(inspect.stack()) > sys.getrecursionlimit() // 2):   # Note: https://github.com/sqlmapproject/sqlmap/issues/4525
+                warnMsg = "unable to connect to the target URL"
+                raise SqlmapConnectionException(warnMsg)
+        except (TypeError, UnicodeError):
+            pass
 
         try:
             return Connect.getPage(**kwargs)
@@ -163,7 +182,7 @@ class Connect(object):
 
         if conf.proxyList and threadData.retriesCount >= conf.retries and not kb.locks.handlers.locked():
             warnMsg = "changing proxy"
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             conf.proxy = None
             threadData.retriesCount = 0
@@ -216,18 +235,63 @@ class Connect(object):
         return Connect._getPageProxy(**kwargs)
 
     @staticmethod
+    def _parseRetryAfter(responseHeaders):
+        """
+        Parses a 'Retry-After' response header (RFC 7231 delta-seconds or an HTTP-date) into a number
+        of seconds to wait, or None when it is absent or unparseable.
+        """
+
+        value = (responseHeaders.get(HTTP_HEADER.RETRY_AFTER) if responseHeaders else None) or ""
+        value = value.strip()
+
+        if value.isdigit():
+            return float(value)
+
+        parsed = email.utils.parsedate(value)
+        return max(0.0, calendar.timegm(parsed) - time.time()) if parsed else None
+
+    @staticmethod
+    def _rateLimitRetry(responseHeaders, code, **kwargs):
+        """
+        Handles a rate-limited response by honoring its 'Retry-After' (capped), adaptively raising the
+        inter-request delay so subsequent requests self-throttle under the limit, then re-issuing the
+        request. Returns the retried (page, headers, code) or None when the retry budget is exhausted,
+        so the caller can surface the rate-limited response as-is.
+        """
+
+        threadData = getCurrentThreadData()
+        if threadData.retriesCount >= conf.retries or kb.threadException:
+            return None
+
+        retryAfter = Connect._parseRetryAfter(responseHeaders)
+        backoff = min(retryAfter if retryAfter is not None else RATE_LIMIT_DEFAULT_DELAY, RATE_LIMIT_MAX_DELAY)
+
+        # additive-increase throttle: nudge the inter-request delay up toward a sustainable pace. The
+        # auto-throttle is capped, but a larger user-set '--delay' is never lowered. It is monotonic,
+        # so a lost concurrent update across threads self-heals on the next hit.
+        conf.delay = max(conf.delay or 0, min(RATE_LIMIT_MAX_DELAY, (conf.delay or 0) + RATE_LIMIT_DELAY_STEP))
+
+        singleTimeWarnMessage("target appears to be rate-limiting requests; sqlmap is backing off and throttling accordingly (consider raising '--delay' or lowering '--threads')")
+        logger.debug("rate-limited (HTTP %d)%s; sleeping %.1f second(s), inter-request delay now %.1f second(s)" % (code, " honoring 'Retry-After'" if retryAfter is not None else "", backoff, conf.delay))
+
+        time.sleep(backoff)
+        return Connect._retryProxy(**kwargs)
+
+    @staticmethod
     def _connReadProxy(conn):
-        retVal = b""
+        parts = []
+        kb.respTruncated = False
 
         if not kb.dnsMode and conn:
             headers = conn.info()
             if kb.pageCompress and headers and hasattr(headers, "getheader") and (headers.getheader(HTTP_HEADER.CONTENT_ENCODING, "").lower() in ("gzip", "deflate") or "text" not in headers.getheader(HTTP_HEADER.CONTENT_TYPE, "").lower()):
-                retVal = conn.read(MAX_CONNECTION_TOTAL_SIZE)
-                if len(retVal) == MAX_CONNECTION_TOTAL_SIZE:
+                part = conn.read(MAX_CONNECTION_TOTAL_SIZE)
+                if len(part) == MAX_CONNECTION_TOTAL_SIZE:
                     warnMsg = "large compressed response detected. Disabling compression"
                     singleTimeWarnMessage(warnMsg)
                     kb.pageCompress = False
                     raise SqlmapCompressionException
+                parts.append(part)
             else:
                 while True:
                     if not conn:
@@ -242,18 +306,22 @@ class Connect(object):
                         warnMsg = "large response detected. This could take a while"
                         singleTimeWarnMessage(warnMsg)
                         part = re.sub(getBytes(r"(?si)%s.+?%s" % (kb.chars.stop, kb.chars.start)), getBytes("%s%s%s" % (kb.chars.stop, LARGE_READ_TRIM_MARKER, kb.chars.start)), part)
-                        retVal += part
+                        parts.append(part)
+                        kb.respTruncated = True  # response exceeded the read cap and was trimmed (signal for chunked UNION dumping)
                     else:
-                        retVal += part
+                        parts.append(part)
                         break
 
-                    if len(retVal) > MAX_CONNECTION_TOTAL_SIZE:
+                    if sum(len(_) for _ in parts) > MAX_CONNECTION_TOTAL_SIZE:
                         warnMsg = "too large response detected. Automatically trimming it"
                         singleTimeWarnMessage(warnMsg)
+                        kb.respTruncated = True
                         break
 
         if conf.yuge:
-            retVal = YUGE_FACTOR * retVal
+            parts = YUGE_FACTOR * parts
+
+        retVal = b"".join(parts)
 
         return retVal
 
@@ -274,7 +342,7 @@ class Connect(object):
         cookie = kwargs.get("cookie", None)
         ua = kwargs.get("ua", None) or conf.agent
         referer = kwargs.get("referer", None) or conf.referer
-        host = kwargs.get("host", None) or conf.host
+        host = kwargs.get("host", None)
         direct_ = kwargs.get("direct", False)
         multipart = kwargs.get("multipart", None)
         silent = kwargs.get("silent", False)
@@ -291,35 +359,49 @@ class Connect(object):
         finalCode = kwargs.get("finalCode", False)
         chunked = kwargs.get("chunked", False) or conf.chunked
 
-        start = time.time()
-
         if isinstance(conf.delay, (int, float)) and conf.delay > 0:
             time.sleep(conf.delay)
+
+        start = time.time()
 
         threadData = getCurrentThreadData()
         with kb.locks.request:
             kb.requestCounter += 1
-            threadData.lastRequestUID = kb.requestCounter
+            threadData.lastRequestUID = requestUID = kb.requestCounter
 
             if conf.proxyFreq:
-                if kb.requestCounter % conf.proxyFreq == 1:
+                if kb.requestCounter % conf.proxyFreq == 0:
                     conf.proxy = None
 
                     warnMsg = "changing proxy"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
                     setHTTPHandlers()
 
-        if conf.dummy or conf.murphyRate and randomInt() % conf.murphyRate == 0:
-            if conf.murphyRate:
-                time.sleep(randomInt() % (MAX_MURPHY_SLEEP_TIME + 1))
-
-            page, headers, code = randomStr(int(randomInt()), alphabet=[_unichr(_) for _ in xrange(256)]), None, None if not conf.murphyRate else randomInt(3)
-
+        if conf.dummy:
+            page, headers, code = randomStr(int(randomInt()), alphabet=[_unichr(_) for _ in xrange(256)]), None, None
             threadData.lastPage = page
             threadData.lastCode = code
-
             return page, headers, code
+
+        # Simulated jitter (--jitter=N, testing): ~1 in N requests is perturbed to stress the time-/
+        # boolean-based blind jitter defenses. Half the fired events add realistic response LATENCY
+        # (Gaussian jitter across low->high noise, or an occasional heavy-tailed spike) and let the
+        # genuine request proceed; the other half short-circuit with a transient "junk" response
+        # (gateway 5xx, rate-limit, a same-HTTP-code interstitial/maintenance page, or an empty body).
+        if conf.jitter and randomInt() % conf.jitter == 0:
+            if randomInt() % 2 == 0:
+                if random.random() < JITTER_SPIKE_CHANCE:
+                    time.sleep(random.uniform(MAX_JITTER_SPIKE_TIME / 2.0, MAX_JITTER_SPIKE_TIME))  # heavy-tailed spike
+                else:
+                    time.sleep(abs(random.gauss(0, random.choice(JITTER_SIGMAS))))  # continuous jitter
+                # NOTE: falls through to the genuine request, which now carries the injected latency
+            else:
+                page, code = random.choice(JITTER_JUNK_RESPONSES)
+                headers = None
+                threadData.lastPage = page
+                threadData.lastCode = code
+                return page, headers, code
 
         if conf.liveCookies:
             with kb.locks.liveCookies:
@@ -342,8 +424,19 @@ class Connect(object):
                         errMsg = "problem occurred while loading cookies from file '%s'" % conf.liveCookies
                         raise SqlmapValueException(errMsg)
 
-                cookie = openFile(conf.liveCookies).read().strip()
-                cookie = re.sub(r"(?i)\ACookie:\s*", "", cookie)
+                with openFile(conf.liveCookies) as f:
+                    live = re.sub(r"(?i)\ACookie:\s*", "", f.read().strip())
+
+                # Note: (live) values are taken, except for the cookie(s) currently carrying the payload (i.e. differing from the original value)
+                delimiter = conf.cookieDel or DEFAULT_COOKIE_DELIMITER
+                original = conf.paramDict.get(PLACE.COOKIE) or {}
+                for part in (cookie or "").split(delimiter):
+                    name, _, value = part.strip().partition('=')
+                    if name in original and value != original[name]:
+                        regex = r"(\A|(?<=[%s\s]))%s=[^%s]*" % (re.escape(delimiter), re.escape(name), re.escape(delimiter))
+                        live = re.sub(regex, lambda match: "%s=%s" % (name, value), live) if re.search(regex, live) else "%s%s %s=%s" % (live, delimiter, name, value)
+
+                cookie = live
 
         if multipart:
             post = multipart
@@ -387,6 +480,8 @@ class Connect(object):
         responseHeaders = None
         logHeaders = u""
         skipLogTraffic = False
+        authRetry = False
+        authVersion = None
 
         raise404 = raise404 and not kb.ignoreNotFound
 
@@ -409,13 +504,13 @@ class Connect(object):
             elif target:
                 if conf.forceSSL:
                     url = re.sub(r"(?i)\A(http|ws):", r"\g<1>s:", url)
-                    url = re.sub(r"(?i):80/", ":443/", url)
+                    url = re.sub(r"(?i):80(?=[/?#]|\Z)", ":443", url)
 
                 if PLACE.GET in conf.parameters and not get:
                     get = conf.parameters[PLACE.GET]
 
                     if not conf.skipUrlEncode:
-                        get = urlencode(get, limit=True)
+                        get = urlencode(get, safe="%%&=-_%s" % (conf.paramDel or ""), limit=True)
 
                 if get:
                     if '?' in url:
@@ -435,7 +530,9 @@ class Connect(object):
             requestMsg += " %s" % _http_client.HTTPConnection._http_vsn_str
 
             # Prepare HTTP headers
-            headers = forgeHeaders({HTTP_HEADER.COOKIE: cookie, HTTP_HEADER.USER_AGENT: ua, HTTP_HEADER.REFERER: referer, HTTP_HEADER.HOST: host}, base=None if target else {})
+            headers = forgeHeaders({HTTP_HEADER.COOKIE: cookie, HTTP_HEADER.USER_AGENT: ua, HTTP_HEADER.REFERER: referer, HTTP_HEADER.HOST: host or getHeader(dict(conf.httpHeaders), HTTP_HEADER.HOST) or getHostHeader(url)}, base=None if target else {})
+            # WebSocket builds its own default Host, but must preserve explicit overrides.
+            customWsHost = webSocket and bool(host or getHeader(dict(conf.httpHeaders), HTTP_HEADER.HOST) or getHeader(auxHeaders, HTTP_HEADER.HOST) is not None)
 
             if HTTP_HEADER.COOKIE in headers:
                 cookie = headers[HTTP_HEADER.COOKIE]
@@ -447,9 +544,6 @@ class Connect(object):
                 headers[HTTP_HEADER.PROXY_AUTHORIZATION] = kb.proxyAuthHeader
 
             if not conf.requestFile or not target:
-                if not getHeader(headers, HTTP_HEADER.HOST):
-                    headers[HTTP_HEADER.HOST] = getHostHeader(url)
-
                 if not getHeader(headers, HTTP_HEADER.ACCEPT):
                     headers[HTTP_HEADER.ACCEPT] = HTTP_ACCEPT_HEADER_VALUE
 
@@ -463,7 +557,7 @@ class Connect(object):
                         break
 
             if post is not None and not multipart and not getHeader(headers, HTTP_HEADER.CONTENT_TYPE):
-                headers[HTTP_HEADER.CONTENT_TYPE] = POST_HINT_CONTENT_TYPES.get(kb.postHint, DEFAULT_CONTENT_TYPE)
+                headers[HTTP_HEADER.CONTENT_TYPE] = POST_HINT_CONTENT_TYPES.get(kb.postHint, DEFAULT_CONTENT_TYPE if unArrayizeValue(conf.base64Parameter) != HTTPMETHOD.POST else PLAIN_TEXT_CONTENT_TYPE)
 
             if headers.get(HTTP_HEADER.CONTENT_TYPE) == POST_HINT_CONTENT_TYPES[POST_HINT.MULTIPART]:
                 warnMsg = "missing 'boundary parameter' in '%s' header. " % HTTP_HEADER.CONTENT_TYPE
@@ -484,17 +578,30 @@ class Connect(object):
                 headers = forgeHeaders(auxHeaders, headers)
 
             if kb.headersFile:
-                content = openFile(kb.headersFile, "rb").read()
+                with openFile(kb.headersFile, 'r') as f:
+                    content = f.read()
                 for line in content.split("\n"):
                     line = getText(line.strip())
                     if ':' in line:
                         header, value = line.split(':', 1)
                         headers[header] = value
+                        if webSocket and header.upper() == HTTP_HEADER.HOST.upper():
+                            headers[HTTP_HEADER.HOST] = value
+                            customWsHost = True
 
             if conf.localhost:
                 headers[HTTP_HEADER.HOST] = "localhost"
+                customWsHost = True
 
             for key, value in list(headers.items()):
+                if key.upper() == HTTP_HEADER.ACCEPT_ENCODING.upper():
+                    # keep only content-codings sqlmap can actually decode (see decodePage): a browser-pasted
+                    # 'Accept-Encoding' must not make the server return a body we cannot read. 'br' is always
+                    # decodable (in-tree decoder), 'zstd' only on interpreters that ship it; anything else is
+                    # dropped, falling back to "identity".
+                    decodable = ["gzip", "x-gzip", "deflate", "br", "identity"] + (["zstd"] if HTTP_ZSTD_AVAILABLE else [])
+                    value = ','.join(_ for _ in re.split(r"\s*,\s*", value) if _.split(';', 1)[0].strip().lower() in decodable) or "identity"
+
                 del headers[key]
                 if isinstance(value, six.string_types):
                     for char in (r"\r", r"\n"):
@@ -506,28 +613,41 @@ class Connect(object):
 
             if webSocket:
                 ws = websocket.WebSocket()
-                ws.settimeout(WEBSOCKET_INITIAL_TIMEOUT if kb.webSocketRecvCount is None else timeout)
-                ws.connect(url, header=("%s: %s" % _ for _ in headers.items() if _[0] not in ("Host",)), cookie=cookie)  # WebSocket will add Host field of headers automatically
-                ws.send(urldecode(post or ""))
+                try:
+                    ws.settimeout(WEBSOCKET_INITIAL_TIMEOUT if kb.webSocketRecvCount is None else timeout)
+                    wsHeaders = tuple("%s: %s" % (getUnicode(key), getUnicode(value)) for key, value in headers.items() if getUnicode(key).upper() != HTTP_HEADER.HOST.upper())
+                    ws.connect(url, header=wsHeaders, cookie=cookie, hostHeader=getHeader(headers, HTTP_HEADER.HOST) if customWsHost else None)
+                    ws.send(urldecode(post or ""))
 
-                _page = []
+                    _page = []
 
-                if kb.webSocketRecvCount is None:
-                    while True:
-                        try:
-                            _page.append(ws.recv())
-                        except websocket.WebSocketTimeoutException:
-                            kb.webSocketRecvCount = len(_page)
-                            break
-                else:
-                    for i in xrange(max(1, kb.webSocketRecvCount)):
-                        _page.append(ws.recv())
+                    if kb.webSocketRecvCount is None:
+                        while True:
+                            try:
+                                _page.append(ws.recv())
+                                if sum(len(_) for _ in _page) > MAX_CONNECTION_TOTAL_SIZE:
+                                    warnMsg = "too large websocket response detected. Automatically trimming it"
+                                    singleTimeWarnMessage(warnMsg)
+                                    break
+                            except (websocket.WebSocketTimeoutException, websocket.WebSocketNormalClosureException):
+                                kb.webSocketRecvCount = len(_page)
+                                break
+                    else:
+                        for i in xrange(max(1, kb.webSocketRecvCount)):
+                            # Note: a later response may carry fewer frames than the calibration one
+                            # (e.g. a FALSE boolean-blind reply); stop on timeout or normal closure,
+                            # mirroring the initial recv loop above
+                            try:
+                                _page.append(ws.recv())
+                            except (websocket.WebSocketTimeoutException, websocket.WebSocketNormalClosureException):
+                                break
 
-                page = "\n".join(_page)
+                    page = "\n".join(_page)
+                finally:
+                    ws.close()
 
-                ws.close()
                 code = ws.status
-                status = _http_client.responses[code]
+                status = _http_client.responses.get(code, "")
 
                 class _(dict):
                     pass
@@ -535,7 +655,7 @@ class Connect(object):
                 responseHeaders = _(ws.getheaders())
                 responseHeaders.headers = ["%s: %s\r\n" % (_[0].capitalize(), _[1]) for _ in responseHeaders.items()]
 
-                requestHeaders += "\r\n".join(["%s: %s" % (getUnicode(key.capitalize() if hasattr(key, "capitalize") else key), getUnicode(value)) for (key, value) in responseHeaders.items()])
+                requestHeaders += "\r\n".join(wsHeaders)
                 requestMsg += "\r\n%s" % requestHeaders
 
                 if post is not None:
@@ -547,7 +667,22 @@ class Connect(object):
 
                 logger.log(CUSTOM_LOGGING.TRAFFIC_OUT, requestMsg)
             else:
+                # re-encode a gRPC-Web body from its injected JSON view, fixing length prefixes
+                if kb.postHint == POST_HINT.GRPC_WEB and post is not None:
+                    post = grpcEncodeBody(post)
+
                 post = getBytes(post)
+
+                # Reference: https://github.com/sqlmapproject/sqlmap/issues/6049
+                if cmdLineOptions.method is None and method == HTTPMETHOD.GET and post == b"":
+                    post = None
+
+                if unArrayizeValue(conf.base64Parameter) == HTTPMETHOD.POST:
+                    if kb.place != HTTPMETHOD.POST:
+                        conf.data = getattr(conf.data, UNENCODED_ORIGINAL_VALUE, conf.data)
+                    else:
+                        post = urldecode(post, convall=True)
+                        post = encodeBase64(post, safe=conf.base64Safe)
 
                 if target and cmdLineOptions.method or method and method not in (HTTPMETHOD.GET, HTTPMETHOD.POST):
                     req = MethodRequest(url, post, headers)
@@ -567,11 +702,15 @@ class Connect(object):
                     else:
                         post, headers = req.data, req.headers
 
-                requestHeaders += "\r\n".join(["%s: %s" % (getUnicode(key.capitalize() if hasattr(key, "capitalize") else key), getUnicode(value)) for (key, value) in req.header_items()])
+                authVersion = authrefresh.apply(req)
+                headers = req.headers
+
+                requestHeaders += "\r\n".join(["%s: %s" % (u"-".join(_.capitalize() for _ in getUnicode(key).split(u'-')) if hasattr(key, "capitalize") else getUnicode(key), getUnicode(value)) for (key, value) in req.header_items()])
 
                 if not getRequestHeader(req, HTTP_HEADER.COOKIE) and conf.cj:
                     conf.cj._policy._now = conf.cj._now = int(time.time())
-                    cookies = conf.cj._cookies_for_request(req)
+                    with conf.cj._cookies_lock:
+                        cookies = conf.cj._cookies_for_request(req)
                     requestHeaders += "\r\n%s" % ("Cookie: %s" % ";".join("%s=%s" % (getUnicode(cookie.name), getUnicode(cookie.value)) for cookie in cookies))
 
                 if post is not None:
@@ -589,11 +728,6 @@ class Connect(object):
                 if not chunked:
                     requestMsg += "\r\n"
 
-                if not multipart:
-                    threadData.lastRequestMsg = requestMsg
-
-                    logger.log(CUSTOM_LOGGING.TRAFFIC_OUT, requestMsg)
-
                 if conf.cj:
                     for cookie in conf.cj:
                         if cookie.value is None:
@@ -602,7 +736,61 @@ class Connect(object):
                             for char in (r"\r", r"\n"):
                                 cookie.value = re.sub(r"(%s)([^ \t])" % char, r"\g<1>\t\g<2>", cookie.value)
 
-                conn = _urllib.request.urlopen(req)
+                # Build-only capture: return the fully-assembled request instead of sending it, so the
+                # HTTP/2 timeless-timing oracle (lib/request/timeless.py) can coalesce two of these into a
+                # single multiplexed pair rather than issue them as independent single-stream requests.
+                if kwargs.get("buildOnly"):
+                    return (url, method or (HTTPMETHOD.POST if post is not None else HTTPMETHOD.GET), headers, post)
+
+                if conf.http2:
+                    from lib.request.http2 import open_url as http2OpenUrl
+                    from lib.request.http2 import proxy_tuple
+
+                    # Note: (preemptive) Basic authentication, as urllib's handlers are bypassed
+                    if (conf.authType or "").lower() == AUTH_TYPE.BASIC and conf.authUsername is not None and HTTP_HEADER.AUTHORIZATION not in headers:
+                        headers[HTTP_HEADER.AUTHORIZATION] = "Basic %s" % encodeBase64("%s:%s" % (conf.authUsername, conf.authPassword or ""), binary=False)
+
+                    try:
+                        h2proxy = proxy_tuple(conf.proxy, conf.proxyCred)
+                    except ValueError:
+                        raise SqlmapMissingDependence("native HTTP/2 client does not support SOCKS proxies (omit '--http2' or use an HTTP proxy)")
+
+                    # Note: cookie jar handling (i.e. Set-Cookie), as urllib's HTTPCookieProcessor is bypassed
+                    if conf.cj is not None and HTTP_HEADER.COOKIE not in headers:
+                        try:
+                            conf.cj.add_cookie_header(req)
+                            if req.get_header(HTTP_HEADER.COOKIE):
+                                headers[HTTP_HEADER.COOKIE] = req.get_header(HTTP_HEADER.COOKIE)
+                        except Exception as ex:
+                            logger.debug("problem occurred while adding HTTP/2 cookies ('%s')" % getSafeExString(ex))
+
+                    try:
+                        conn = http2OpenUrl(url, method or (HTTPMETHOD.POST if post is not None else HTTPMETHOD.GET), headers, post, timeout, follow_redirects=kb.choices.redirect != REDIRECTION.NO and not conf.ignoreRedirects, proxy=h2proxy, sensitive_headers=tuple(kb.authRefreshHeaders) if conf.authRefresh else ())
+                    except IOError as ex:
+                        raise _http_client.HTTPException(getSafeExString(ex))
+                    else:
+                        if conf.cj is not None:
+                            try:
+                                conf.cj.extract_cookies(conn, req)
+                            except Exception as ex:
+                                logger.debug("problem occurred while storing HTTP/2 cookies ('%s')" % getSafeExString(ex))
+
+                        if conn.code >= 400:
+                            raise _urllib.error.HTTPError(conn.geturl(), conn.code, conn.msg, conn.info(), io.BytesIO(conn.read()))
+
+                        requestMsg = re.sub(r" HTTP/[0-9.]+\r\n", " %s\r\n" % conn.http_version, requestMsg, count=1)
+
+                        if not multipart:
+                            threadData.lastRequestMsg = requestMsg
+
+                            logger.log(CUSTOM_LOGGING.TRAFFIC_OUT, requestMsg)
+                else:
+                    if not multipart:
+                        threadData.lastRequestMsg = requestMsg
+
+                        logger.log(CUSTOM_LOGGING.TRAFFIC_OUT, requestMsg)
+
+                    conn = _urllib.request.urlopen(req)
 
                 if not kb.authHeader and getRequestHeader(req, HTTP_HEADER.AUTHORIZATION) and (conf.authType or "").lower() == AUTH_TYPE.BASIC.lower():
                     kb.authHeader = getUnicode(getRequestHeader(req, HTTP_HEADER.AUTHORIZATION))
@@ -627,10 +815,10 @@ class Connect(object):
                     responseHeaders = conn.info()
                     responseHeaders[URI_HTTP_HEADER] = conn.geturl() if hasattr(conn, "geturl") else url
 
-                    if hasattr(conn, "redurl"):
+                    if getattr(conn, "redurl", None) is not None:
                         responseHeaders[HTTP_HEADER.LOCATION] = conn.redurl
 
-                    patchHeaders(responseHeaders)
+                    responseHeaders = patchHeaders(responseHeaders)
                     kb.serverHeader = responseHeaders.get(HTTP_HEADER.SERVER, kb.serverHeader)
                 else:
                     code = None
@@ -685,12 +873,23 @@ class Connect(object):
             # Explicit closing of connection object
             if conn and not conf.keepAlive:
                 try:
-                    if hasattr(conn.fp, '_sock'):
+                    if hasattr(conn, "fp") and hasattr(conn.fp, '_sock'):
                         conn.fp._sock.close()
                     conn.close()
                 except Exception as ex:
                     warnMsg = "problem occurred during connection closing ('%s')" % getSafeExString(ex)
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
+
+            # Keep-alive: dispose the response explicitly. Its wrapped close() hands the socket
+            # back to the pool when the body was fully drained, otherwise drops it (a size-capped
+            # partial read must not be reused). This avoids leaning on GC to reclaim it (delayed on
+            # non-refcounting runtimes like PyPy). Guarded by the handler's marker so the HTTP/2
+            # reuse pool is left untouched.
+            elif conn is not None and getattr(conn, "_keepaliveManaged", False):
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
         except SqlmapConnectionException as ex:
             if conf.proxyList and not kb.threadException:
@@ -705,19 +904,19 @@ class Connect(object):
             page = None
             responseHeaders = None
 
-            if checking:
+            if checking and not (ex.code == _http_client.UNAUTHORIZED and authVersion is not None):
                 return None, None, None
 
             try:
                 page = ex.read() if not skipRead else None
                 responseHeaders = ex.info()
                 responseHeaders[URI_HTTP_HEADER] = ex.geturl()
-                patchHeaders(responseHeaders)
+                responseHeaders = patchHeaders(responseHeaders)
                 page = decodePage(page, responseHeaders.get(HTTP_HEADER.CONTENT_ENCODING), responseHeaders.get(HTTP_HEADER.CONTENT_TYPE), percentDecode=not crawling)
             except socket.timeout:
                 warnMsg = "connection timed out while trying "
                 warnMsg += "to get error page information (%d)" % ex.code
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
                 return None, None, None
             except KeyboardInterrupt:
                 raise
@@ -729,13 +928,14 @@ class Connect(object):
             code = ex.code
             status = getUnicode(getattr(ex, "reason", None) or getSafeExString(ex).split(": ", 1)[-1])
 
-            kb.originalCode = kb.originalCode or code
+            if not (code == _http_client.UNAUTHORIZED and authVersion is not None):
+                kb.originalCode = kb.originalCode or code
             threadData.lastHTTPError = (threadData.lastRequestUID, code, status)
             kb.httpErrorCodes[code] = kb.httpErrorCodes.get(code, 0) + 1
 
             responseMsg += "[#%d] (%s %s):\r\n" % (threadData.lastRequestUID, code, status)
 
-            if responseHeaders:
+            if responseHeaders and getattr(responseHeaders, "headers", None):
                 logHeaders = "".join(getUnicode(responseHeaders.headers)).strip()
 
             logHTTPTraffic(requestMsg, "%s%s\r\n\r\n%s" % (responseMsg, logHeaders, (page or "")[:MAX_CONNECTION_READ_SIZE]), start, time.time())
@@ -750,8 +950,27 @@ class Connect(object):
             if not multipart:
                 logger.log(CUSTOM_LOGGING.TRAFFIC_IN, responseMsg)
 
-            if ex.code not in (conf.ignoreCode or []):
-                if ex.code == _http_client.UNAUTHORIZED:
+            if code in conf.abortCode:
+                errMsg = "aborting due to detected HTTP code '%d'" % code
+                singleTimeLogMessage(errMsg, logging.CRITICAL)
+                raise SystemExit
+
+            if ex.code == _http_client.UNAUTHORIZED and authVersion is not None and authrefresh.sameOrigin(ex.geturl(), url):
+                if kwargs.get("authRetried"):
+                    with kb.locks.authRefresh:
+                        if authVersion == kb.authRefreshVersion:
+                            kb.authRefreshFailed = True
+                    raise SqlmapConnectionException("authentication refresh did not authorize the retried request (401)")
+                authrefresh.refresh(authVersion)
+                authRetry = True
+            elif ex.code not in (conf.ignoreCode or []):
+                if ex.code == TOO_MANY_REQUESTS_HTTP_CODE or (ex.code == _http_client.SERVICE_UNAVAILABLE and Connect._parseRetryAfter(responseHeaders) is not None):
+                    retried = Connect._rateLimitRetry(responseHeaders, ex.code, **kwargs)
+                    if retried is not None:
+                        return retried
+                    debugMsg = "target kept rate-limiting after %d retries (%d)" % (conf.retries, code)
+                    logger.debug(debugMsg)
+                elif ex.code == _http_client.UNAUTHORIZED:
                     errMsg = "not authorized, try to provide right HTTP "
                     errMsg += "authentication type and valid credentials (%d). " % code
                     errMsg += "If this is intended, try to rerun by providing "
@@ -792,7 +1011,7 @@ class Connect(object):
                     debugMsg = "got HTTP error code: %d ('%s')" % (code, status)
                     logger.debug(debugMsg)
 
-        except (_urllib.error.URLError, socket.error, socket.timeout, _http_client.HTTPException, struct.error, binascii.Error, ProxyError, SqlmapCompressionException, WebSocketException, TypeError, ValueError, OverflowError, AttributeError):
+        except (_urllib.error.URLError, socket.error, socket.timeout, _http_client.HTTPException, struct.error, binascii.Error, ProxyError, SqlmapCompressionException, WebSocketException, TypeError, ValueError, OverflowError, AttributeError, OSError, AssertionError, KeyError):
             tbMsg = traceback.format_exc()
 
             if conf.debug:
@@ -800,6 +1019,11 @@ class Connect(object):
 
             if checking:
                 return None, None, None
+            elif "KeyError:" in tbMsg:
+                if "content-length" in tbMsg:
+                    return None, None, None
+                else:
+                    raise
             elif "AttributeError:" in tbMsg:
                 if "WSAECONNREFUSED" in tbMsg:
                     return None, None, None
@@ -808,7 +1032,7 @@ class Connect(object):
             elif "no host given" in tbMsg:
                 warnMsg = "invalid URL address used (%s)" % repr(url)
                 raise SqlmapSyntaxException(warnMsg)
-            elif "forcibly closed" in tbMsg or "Connection is already closed" in tbMsg:
+            elif any(_ in tbMsg for _ in ("forcibly closed", "Connection is already closed", "ConnectionAbortedError")):
                 warnMsg = "connection was forcibly closed by the target URL"
             elif "timed out" in tbMsg:
                 if kb.testMode and kb.testType not in (None, PAYLOAD.TECHNIQUE.TIME, PAYLOAD.TECHNIQUE.STACKED):
@@ -890,12 +1114,6 @@ class Connect(object):
                 raise SqlmapConnectionException(warnMsg)
 
         finally:
-            if isinstance(page, six.binary_type):
-                if HTTP_HEADER.CONTENT_TYPE in (responseHeaders or {}) and not re.search(TEXT_CONTENT_TYPE_REGEX, responseHeaders[HTTP_HEADER.CONTENT_TYPE]):
-                    page = six.text_type(page, errors="ignore")
-                else:
-                    page = getUnicode(page)
-
             for function in kb.postprocessFunctions:
                 try:
                     page, responseHeaders, code = function(page, responseHeaders, code)
@@ -904,10 +1122,48 @@ class Connect(object):
                     errMsg += "function '%s' ('%s')" % (function.__name__, getSafeExString(ex))
                     raise SqlmapGenericException(errMsg)
 
-            threadData.lastPage = page
-            threadData.lastCode = code
+                # a postprocess function may replace responseHeaders with a plain dict lacking
+                # the internal '.headers' attribute expected further down (e.g. in processResponse())
+                responseHeaders = patchHeaders(responseHeaders)
+
+            if isinstance(page, six.binary_type):
+                if HTTP_HEADER.CONTENT_TYPE in (responseHeaders or {}) and not re.search(TEXT_CONTENT_TYPE_REGEX, responseHeaders[HTTP_HEADER.CONTENT_TYPE]):
+                    page = six.text_type(page, errors="ignore")
+                else:
+                    page = getUnicode(page)
+
+            for _ in (getattr(conn, "redcode", None), code):
+                if _ is not None and _ in conf.abortCode:
+                    errMsg = "aborting due to detected HTTP code '%d'" % _
+                    singleTimeLogMessage(errMsg, logging.CRITICAL)
+                    raise SystemExit
+
+            # decode a gRPC-Web response to readable text so the oracle/error/inband paths see the
+            # message fields + trailer (grpc-message) instead of an opaque base64 blob. Headers are
+            # passed so a trailers-only error (empty body, grpc-status/message in headers) is still surfaced
+            if kb.postHint == POST_HINT.GRPC_WEB:
+                page = grpcDecodeResponse(page, responseHeaders)
+
+            # Note: in case of a (nested) retried request, its (last) response is the relevant one
+            if threadData.lastRequestUID == requestUID:
+                threadData.lastPage = page
+                threadData.lastCode = code
 
             socket.setdefaulttimeout(conf.timeout)
+
+        if authRetry:
+            # Authentication latency is not evidence of a time-based SQL injection.
+            threadData.authRefreshTime += calculateDeltaSeconds(start)
+            kwargs["authRetried"] = True
+            return Connect.getPage(**kwargs)
+
+        # Dirty patch for Python3.11.0a7 (e.g. https://github.com/sqlmapproject/sqlmap/issues/5091)
+        if not sys.version.startswith("3.11."):
+            if conf.retryOn and re.search(conf.retryOn, page or "", re.I):
+                if threadData.retriesCount < conf.retries:
+                    warnMsg = "forced retry of the request because of undesired page content"
+                    logger.warning(warnMsg)
+                    return Connect._retryProxy(**kwargs)
 
         processResponse(page, responseHeaders, code, status)
 
@@ -915,7 +1171,7 @@ class Connect(object):
             if conn and getattr(conn, "redurl", None):
                 _ = _urllib.parse.urlsplit(conn.redurl)
                 _ = ("%s%s" % (_.path or "/", ("?%s" % _.query) if _.query else ""))
-                requestMsg = re.sub(r"(\n[A-Z]+ ).+?( HTTP/\d)", r"\g<1>%s\g<2>" % getUnicode(_).replace("\\", "\\\\"), requestMsg, 1)
+                requestMsg = re.sub(r"(\n[A-Z]+ ).+?( HTTP/\d)", r"\g<1>%s\g<2>" % getUnicode(_).replace("\\", "\\\\"), requestMsg, count=1)
 
                 if kb.resendPostOnRedirect is False:
                     requestMsg = re.sub(r"(\[#\d+\]:\n)POST ", r"\g<1>GET ", requestMsg)
@@ -943,7 +1199,7 @@ class Connect(object):
 
     @staticmethod
     @stackedmethod
-    def queryPage(value=None, place=None, content=False, getRatioValue=False, silent=False, method=None, timeBasedCompare=False, noteResponseTime=True, auxHeaders=None, response=False, raise404=None, removeReflection=True, disableTampering=False, ignoreSecondOrder=False):
+    def queryPage(value=None, place=None, content=False, getRatioValue=False, silent=False, method=None, timeBasedCompare=False, noteResponseTime=True, auxHeaders=None, response=False, raise404=None, removeReflection=True, disableTampering=False, ignoreSecondOrder=False, buildOnly=False):
         """
         This method calls a function to get the target URL page content
         and returns its page ratio (0 <= ratio <= 1) or a boolean value
@@ -952,6 +1208,19 @@ class Connect(object):
 
         if conf.direct:
             return direct(value, content)
+
+        # Snapshot the pristine payload for the timeless oracle before placement/tampering rewrites it,
+        # so its sentinel-bracketed comparison can be negated to build the symmetric-oracle pair.
+        timelessOrigValue = value if (timeBasedCompare and kb.get("timeless") is not None) else None
+
+        # Timeless disengaged mid-value: bisection froze its comparison template from the heavy (no-delay)
+        # vector when this value started, so it keeps forging heavy payloads until it builds the next one -
+        # and wall-clock comparison reads every one of them as False. Re-forge those stragglers onto the
+        # restored vector. Only fires while such a payload is actually in flight (it must still carry the
+        # timeless sentinels), so it is a no-op on any ordinary time-based scan.
+        if timeBasedCompare and value and kb.get("timelessRestore") and kb.get("timeless") is None:
+            from lib.request.timeless import restoreClassicValue
+            value = restoreClassicValue(value, kb.timelessRestore) or value
 
         get = None
         post = None
@@ -967,6 +1236,8 @@ class Connect(object):
         if not place:
             place = kb.injection.place or PLACE.GET
 
+        kb.place = place
+
         if not auxHeaders:
             auxHeaders = {}
 
@@ -979,22 +1250,35 @@ class Connect(object):
         payload = agent.extractPayload(value)
         threadData = getCurrentThreadData()
 
+        # Opt-in sanity lint of the outbound (pre-tamper) payload. Skipped during
+        # detection (kb.testMode) where deliberately-invalid probes are expected;
+        # for operational payloads a structural defect is a genuine bug worth a
+        # heads-up. Enabled via SQLMAP_LINT_PAYLOADS (e.g. CI/--vuln-test runs).
+        if payload and not kb.testMode and os.environ.get("SQLMAP_LINT_PAYLOADS"):
+            for issue in checkSanity(agent.removePayloadDelimiters(value)):
+                singleTimeWarnMessage("potentially malformed SQL payload emitted (%s): %s" % (issue, payload))
+                break
+
         if conf.httpHeaders:
             headers = OrderedDict(conf.httpHeaders)
             contentType = max(headers[_] or "" if _.upper() == HTTP_HEADER.CONTENT_TYPE.upper() else "" for _ in headers) or None
 
             if (kb.postHint or conf.skipUrlEncode) and postUrlEncode:
                 postUrlEncode = False
-                conf.httpHeaders = [_ for _ in conf.httpHeaders if _[1] != contentType]
-                contentType = POST_HINT_CONTENT_TYPES.get(kb.postHint, PLAIN_TEXT_CONTENT_TYPE)
-                conf.httpHeaders.append((HTTP_HEADER.CONTENT_TYPE, contentType))
+                if not (conf.skipUrlEncode and contentType):    # NOTE: https://github.com/sqlmapproject/sqlmap/issues/5092
+                    conf.httpHeaders = [_ for _ in conf.httpHeaders if _[1] != contentType]
+                    contentType = POST_HINT_CONTENT_TYPES.get(kb.postHint, PLAIN_TEXT_CONTENT_TYPE)
+                    conf.httpHeaders.append((HTTP_HEADER.CONTENT_TYPE, contentType))
+                    if "urlencoded" in contentType:
+                        postUrlEncode = True
 
         if payload:
             delimiter = conf.paramDel or (DEFAULT_GET_POST_DELIMITER if place != PLACE.COOKIE else DEFAULT_COOKIE_DELIMITER)
 
             if not disableTampering and kb.tamperFunctions:
+                hints = {}  # Note: shared among all tamper functions (e.g. 'luanginx,space2comment' must keep the former's HINT.PREPEND)
+
                 for function in kb.tamperFunctions:
-                    hints = {}
 
                     try:
                         payload = function(payload=payload, headers=auxHeaders, delimiter=delimiter, hints=hints)
@@ -1025,11 +1309,13 @@ class Connect(object):
             logger.log(CUSTOM_LOGGING.PAYLOAD, safecharencode(payload.replace('\\', BOUNDARY_BACKSLASH_MARKER)).replace(BOUNDARY_BACKSLASH_MARKER, '\\'))
 
             if place == PLACE.CUSTOM_POST and kb.postHint:
-                if kb.postHint in (POST_HINT.SOAP, POST_HINT.XML):
+                if kb.postHint in (POST_HINT.SOAP, POST_HINT.XML) and not conf.skipXmlEncode:
                     # payloads in SOAP/XML should have chars > and < replaced
                     # with their HTML encoded counterparts
+                    payload = payload.replace("&#", SAFE_HEX_MARKER)
                     payload = payload.replace('&', "&amp;").replace('>', "&gt;").replace('<', "&lt;").replace('"', "&quot;").replace("'", "&apos;")  # Reference: https://stackoverflow.com/a/1091953
-                elif kb.postHint == POST_HINT.JSON:
+                    payload = payload.replace(SAFE_HEX_MARKER, "&#")
+                elif kb.postHint in (POST_HINT.JSON, POST_HINT.GRPC_WEB):
                     payload = escapeJsonValue(payload)
                 elif kb.postHint == POST_HINT.JSON_LIKE:
                     payload = payload.replace("'", REPLACEMENT_MARKER).replace('"', "'").replace(REPLACEMENT_MARKER, '"')
@@ -1050,13 +1336,13 @@ class Connect(object):
 
                     if not skip:
                         if place in (PLACE.POST, PLACE.CUSTOM_POST):  # potential problems in other cases (e.g. URL encoding of whole URI - including path)
-                            value = urlencode(value, spaceplus=kb.postSpaceToPlus)
+                            value = urlencode(value, safe="%%&=-_%s" % (conf.paramDel or ""), spaceplus=kb.postSpaceToPlus)
                         payload = urlencode(payload, safe='%', spaceplus=kb.postSpaceToPlus)
                         value = agent.replacePayload(value, payload)
                         postUrlEncode = False
 
             if conf.hpp:
-                if not any(conf.url.lower().endswith(_.lower()) for _ in (WEB_PLATFORM.ASP, WEB_PLATFORM.ASPX)):
+                if (extractRegexResult(r"\.(?P<result>\w+)(?:\?|\Z)", conf.url) or "").lower() not in (WEB_PLATFORM.ASP, WEB_PLATFORM.ASPX):
                     warnMsg = "HTTP parameter pollution should work only against "
                     warnMsg += "ASP(.NET) targets"
                     singleTimeWarnMessage(warnMsg)
@@ -1134,13 +1420,16 @@ class Connect(object):
                 if urlencode(parameter) in paramString:
                     parameter = urlencode(parameter)
 
-                match = re.search(r"%s=[^&]*" % re.escape(parameter), paramString, re.I)
+                # Note: anchor to a real parameter boundary (start or right after '&'/a quote) so that
+                # adjusting e.g. 'token' does not match inside a longer name like 'csrf_token'/'user_token'
+                # and rewrite the wrong parameter (which broke anti-CSRF token injection)
+                match = re.search(r"(?i)(?:\A|(?<=&))%s=[^&]*" % re.escape(parameter), paramString)
                 if match:
-                    retVal = re.sub(r"(?i)%s" % re.escape(match.group(0)), ("%s=%s" % (parameter, newValue)).replace('\\', r'\\'), paramString)
+                    retVal = "%s%s=%s%s" % (paramString[:match.start()], parameter, newValue, paramString[match.end():])
                 else:
-                    match = re.search(r"(%s[\"']:[\"'])([^\"']+)" % re.escape(parameter), paramString, re.I)
+                    match = re.search(r"(?i)[\"']%s[\"']\s*:\s*[\"'](?P<value>[^\"']*)" % re.escape(parameter), paramString)
                     if match:
-                        retVal = re.sub(r"(?i)%s" % re.escape(match.group(0)), "%s%s" % (match.group(1), newValue), paramString)
+                        retVal = "%s%s%s" % (paramString[:match.start("value")], newValue, paramString[match.end("value"):])
 
                 return retVal
 
@@ -1151,10 +1440,10 @@ class Connect(object):
                 if attempt > 0:
                     warnMsg = "unable to find anti-CSRF token '%s' at '%s'" % (conf.csrfToken._original, conf.csrfUrl or conf.url)
                     warnMsg += ". sqlmap is going to retry the request"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
-                page, headers, code = Connect.getPage(url=conf.csrfUrl or conf.url, data=conf.data if conf.csrfUrl == conf.url else None, method=conf.csrfMethod or (conf.method if conf.csrfUrl == conf.url else None), cookie=conf.parameters.get(PLACE.COOKIE), direct=True, silent=True, ua=conf.parameters.get(PLACE.USER_AGENT), referer=conf.parameters.get(PLACE.REFERER), host=conf.parameters.get(PLACE.HOST))
-                page = urldecode(page)  # for anti-CSRF tokens with special characters in their name (e.g. 'foo:bar=...')
+                page, headers, code = Connect.getPage(url=conf.csrfUrl or conf.url, post=conf.csrfData or (conf.data if conf.csrfUrl == conf.url and (conf.csrfMethod or "").upper() == HTTPMETHOD.POST else None), method=conf.csrfMethod or (conf.method if conf.csrfUrl == conf.url else None), cookie=conf.parameters.get(PLACE.COOKIE), direct=True, silent=True, ua=conf.parameters.get(PLACE.USER_AGENT), referer=conf.parameters.get(PLACE.REFERER), host=conf.parameters.get(PLACE.HOST))
+                page = urldecode(page, spaceplus=False)  # for anti-CSRF tokens with special characters in their name (e.g. 'foo:bar=...') - Note: '+' is a legitimate (e.g. Base64) token value character
 
                 match = re.search(r"(?i)<input[^>]+\bname=[\"']?(?P<name>%s)\b[^>]*\bvalue=[\"']?(?P<value>[^>'\"]*)" % conf.csrfToken, page or "", re.I)
 
@@ -1162,10 +1451,10 @@ class Connect(object):
                     match = re.search(r"(?i)<input[^>]+\bvalue=[\"']?(?P<value>[^>'\"]*)[\"']?[^>]*\bname=[\"']?(?P<name>%s)\b" % conf.csrfToken, page or "", re.I)
 
                     if not match:
-                        match = re.search(r"(?P<name>%s)[\"']:[\"'](?P<value>[^\"']+)" % conf.csrfToken, page or "", re.I)
+                        match = re.search(r"(?P<name>%s)[\"']\s*:\s*[\"'](?P<value>[^\"']+)" % conf.csrfToken, page or "", re.I)
 
                         if not match:
-                            match = re.search(r"\b(?P<name>%s)\s*[:=]\s*(?P<value>\w+)" % conf.csrfToken, getUnicode(headers), re.I)
+                            match = re.search(r"\b(?P<name>%s)\s*[:=]\s*(?P<value>[^\s;,]+)" % conf.csrfToken, getUnicode(headers), re.I)
 
                             if not match:
                                 match = re.search(r"\b(?P<name>%s)\s*=\s*['\"]?(?P<value>[^;'\"]+)" % conf.csrfToken, page or "", re.I)
@@ -1182,7 +1471,7 @@ class Connect(object):
 
                 if not token:
                     if conf.csrfUrl and conf.csrfToken and conf.csrfUrl != conf.url and code == _http_client.OK:
-                        if headers and "text/plain" in headers.get(HTTP_HEADER.CONTENT_TYPE, ""):
+                        if headers and PLAIN_TEXT_CONTENT_TYPE in headers.get(HTTP_HEADER.CONTENT_TYPE, ""):
                             token.name = conf.csrfToken
                             token.value = page
 
@@ -1209,14 +1498,17 @@ class Connect(object):
             if token:
                 token.value = token.value.strip("'\"")
 
+                # Note: (decoded) token value has to be URL encoded for (URL encoded) places (e.g. Base64 token 'ab+cd/ef==' -> 'ab%2Bcd%2Fef%3D%3D')
+                encoded = urlencode(token.value, convall=True)
+
                 for candidate in (PLACE.GET, PLACE.POST, PLACE.CUSTOM_POST, PLACE.URI):
                     if candidate in conf.parameters:
                         if candidate == PLACE.URI and uri:
-                            uri = _adjustParameter(uri, token.name, token.value)
+                            uri = _adjustParameter(uri, token.name, encoded)
                         elif candidate == PLACE.GET and get:
-                            get = _adjustParameter(get, token.name, token.value)
+                            get = _adjustParameter(get, token.name, encoded)
                         elif candidate in (PLACE.POST, PLACE.CUSTOM_POST) and post:
-                            post = _adjustParameter(post, token.name, token.value)
+                            post = _adjustParameter(post, token.name, encoded if candidate == PLACE.POST else token.value)
 
                 for i in xrange(len(conf.httpHeaders)):
                     if conf.httpHeaders[i][0].lower() == token.name.lower():
@@ -1225,11 +1517,20 @@ class Connect(object):
         if conf.rParam:
             def _randomizeParameter(paramString, randomParameter):
                 retVal = paramString
-                match = re.search(r"(\A|\b)%s=(?P<value>[^&;]*)" % re.escape(randomParameter), paramString)
+                # Note: anchor to a real parameter boundary (start, or the '&'/';' delimiter with any
+                # following space), like _adjustParameter, so randomizing 'id' does not match inside a
+                # longer name such as 'user-id'/'session-id'; the captured prefix is kept on replace
+                match = re.search(r"(?:\A|[&;]\s*)%s=(?P<value>[^&;]*)" % re.escape(randomParameter), paramString)
                 if match:
                     origValue = match.group("value")
                     newValue = randomizeParameterValue(origValue) if randomParameter not in kb.randomPool else random.sample(kb.randomPool[randomParameter], 1)[0]
-                    retVal = re.sub(r"(\A|\b)%s=[^&;]*" % re.escape(randomParameter), "%s=%s" % (randomParameter, newValue), paramString)
+                    retVal = re.sub(r"(\A|[&;]\s*)%s=[^&;]*" % re.escape(randomParameter), lambda m: "%s%s=%s" % (m.group(1), randomParameter, newValue), paramString)
+                else:
+                    match = re.search(r"(\A|\b)(%s\b[^\w]+)(?P<value>\w+)" % re.escape(randomParameter), paramString)
+                    if match:
+                        origValue = match.group("value")
+                        newValue = randomizeParameterValue(origValue) if randomParameter not in kb.randomPool else random.sample(kb.randomPool[randomParameter], 1)[0]
+                        retVal = paramString.replace(match.group(0), "%s%s" % (match.group(2), newValue))
                 return retVal
 
             for randomParameter in conf.rParam:
@@ -1265,6 +1566,14 @@ class Connect(object):
                         value = urldecode(value, convall=True, spaceplus=(item == post and kb.postSpaceToPlus))
                         variables[name] = value
 
+            if post and kb.postHint in (POST_HINT.JSON, POST_HINT.JSON_LIKE, POST_HINT.GRPC_WEB):
+                json_ = parseJson(post)
+                for name, value in (json_ if isinstance(json_, dict) else {}).items():
+                    if safeVariableNaming(name) != name:
+                        conf.evalCode = re.sub(r"\b%s\b" % re.escape(name), safeVariableNaming(name), conf.evalCode)
+                        name = safeVariableNaming(name)
+                    variables[name] = value
+
             if cookie:
                 for part in cookie.split(conf.cookieDel or DEFAULT_COOKIE_DELIMITER):
                     if '=' in part:
@@ -1281,7 +1590,7 @@ class Connect(object):
                     compile(getBytes(re.sub(r"\s*;\s*", "\n", conf.evalCode)), "", "exec")
                 except SyntaxError as ex:
                     if ex.text:
-                        original = replacement = ex.text.strip()
+                        original = replacement = getUnicode(ex.text.strip())
 
                         if '=' in original:
                             name, value = original.split('=', 1)
@@ -1309,67 +1618,157 @@ class Connect(object):
 
             for variable in list(variables.keys()):
                 if unsafeVariableNaming(variable) != variable:
-                    value = variables[variable]
+                    entry = variables[variable]
                     del variables[variable]
-                    variables[unsafeVariableNaming(variable)] = value
+                    variables[unsafeVariableNaming(variable)] = entry
 
             uri = variables["uri"]
             cookie = variables["cookie"]
 
-            for name, value in variables.items():
-                if name != "__builtins__" and originals.get(name, "") != value:
-                    if isinstance(value, (int, float, six.string_types, six.binary_type)):
+            for name, entry in variables.items():
+                if name != "__builtins__" and originals.get(name, "") != entry:
+                    if isinstance(entry, (int, float, six.string_types, six.binary_type)):
                         found = False
-                        value = getUnicode(value, UNICODE_ENCODING)
+                        entry = getUnicode(entry, UNICODE_ENCODING)
 
-                        if kb.postHint and re.search(r"\b%s\b" % re.escape(name), post or ""):
+                        if kb.postHint == POST_HINT.MULTIPART:
+                            boundary = "--%s" % re.search(r"boundary=([^\s]+)", contentType).group(1)
+                            if boundary:
+                                parts = post.split(boundary)
+                                match = re.search(r'\bname="%s"' % re.escape(name), post)
+                                if not match and parts:
+                                    parts.insert(2, parts[1])
+                                    parts[2] = re.sub(r'\bname="[^"]+".*', 'name="%s"' % re.escape(name), parts[2])
+                                for i in xrange(len(parts)):
+                                    part = parts[i]
+                                    if re.search(r'\bname="%s"' % re.escape(name), part):
+                                        match = re.search(r"(?s)\A.+?\r?\n\r?\n", part)
+                                        if match:
+                                            found = True
+                                            first = match.group(0)
+                                            second = part[len(first):]
+                                            second = re.sub(r"(?s).+?(\r?\n?\-*\Z)", r"%s\g<1>" % re.escape(entry), second)
+                                            parts[i] = "%s%s" % (first, second)
+                                post = boundary.join(parts)
+
+                        elif kb.postHint and re.search(r"\b%s\b" % re.escape(name), post or ""):
                             if kb.postHint in (POST_HINT.XML, POST_HINT.SOAP):
                                 if re.search(r"<%s\b" % re.escape(name), post):
                                     found = True
-                                    post = re.sub(r"(?s)(<%s\b[^>]*>)(.*?)(</%s)" % (re.escape(name), re.escape(name)), r"\g<1>%s\g<3>" % value.replace('\\', r'\\'), post)
+                                    post = re.sub(r"(?s)(<%s\b[^>]*>)(.*?)(</%s)" % (re.escape(name), re.escape(name)), r"\g<1>%s\g<3>" % entry.replace('\\', r'\\'), post)
                                 elif re.search(r"\b%s>" % re.escape(name), post):
                                     found = True
-                                    post = re.sub(r"(?s)(\b%s>)(.*?)(</[^<]*\b%s>)" % (re.escape(name), re.escape(name)), r"\g<1>%s\g<3>" % value.replace('\\', r'\\'), post)
+                                    post = re.sub(r"(?s)(\b%s>)(.*?)(</[^<]*\b%s>)" % (re.escape(name), re.escape(name)), r"\g<1>%s\g<3>" % entry.replace('\\', r'\\'), post)
+
+                            elif kb.postHint in (POST_HINT.JSON, POST_HINT.JSON_LIKE, POST_HINT.GRPC_WEB):
+                                match = re.search(r"['\"]%s['\"]:" % re.escape(name), post)
+                                if match:
+                                    quote = match.group(0)[0]
+                                    post = post.replace("\\%s" % quote, BOUNDARY_BACKSLASH_MARKER)
+                                    match = re.search(r"(%s%s%s:\s*)(\d+|%s[^%s]*%s)" % (quote, re.escape(name), quote, quote, quote, quote), post)
+                                    if match:
+                                        found = True
+                                        post = post.replace(match.group(0), "%s%s" % (match.group(1), entry if entry.isdigit() else "%s%s%s" % (match.group(0)[0], entry, match.group(0)[0])))
+                                    post = post.replace(BOUNDARY_BACKSLASH_MARKER, "\\%s" % quote)
 
                             regex = r"\b(%s)\b([^\w]+)(\w+)" % re.escape(name)
                             if not found and re.search(regex, (post or "")):
                                 found = True
-                                post = re.sub(regex, r"\g<1>\g<2>%s" % value.replace('\\', r'\\'), post)
+                                post = re.sub(regex, r"\g<1>\g<2>%s" % entry.replace('\\', r'\\'), post)
 
-                        regex = r"((\A|%s)%s=).+?(%s|\Z)" % (re.escape(delimiter), re.escape(name), re.escape(delimiter))
+                        regex = r"((\A|%s)%s=).*?(%s|\Z)" % (re.escape(delimiter), re.escape(name), re.escape(delimiter))
                         if not found and re.search(regex, (post or "")):
                             found = True
-                            post = re.sub(regex, r"\g<1>%s\g<3>" % value.replace('\\', r'\\'), post)
+                            post = re.sub(regex, r"\g<1>%s\g<3>" % entry.replace('\\', r'\\'), post)
 
                         if re.search(regex, (get or "")):
                             found = True
-                            get = re.sub(regex, r"\g<1>%s\g<3>" % value.replace('\\', r'\\'), get)
+                            get = re.sub(regex, r"\g<1>%s\g<3>" % entry.replace('\\', r'\\'), get)
 
                         if re.search(regex, (query or "")):
                             found = True
-                            uri = re.sub(regex.replace(r"\A", r"\?"), r"\g<1>%s\g<3>" % value.replace('\\', r'\\'), uri)
+                            uri = re.sub(regex.replace(r"\A", r"\?"), r"\g<1>%s\g<3>" % entry.replace('\\', r'\\'), uri)
 
-                        regex = r"((\A|%s)%s=).+?(%s|\Z)" % (re.escape(conf.cookieDel or DEFAULT_COOKIE_DELIMITER), re.escape(name), re.escape(conf.cookieDel or DEFAULT_COOKIE_DELIMITER))
+                        regex = r"((\A|%s\s*)%s=).*?(%s|\Z)" % (re.escape(conf.cookieDel or DEFAULT_COOKIE_DELIMITER), re.escape(name), re.escape(conf.cookieDel or DEFAULT_COOKIE_DELIMITER))
                         if re.search(regex, (cookie or "")):
                             found = True
-                            cookie = re.sub(regex, r"\g<1>%s\g<3>" % value.replace('\\', r'\\'), cookie)
+                            cookie = re.sub(regex, r"\g<1>%s\g<3>" % entry.replace('\\', r'\\'), cookie)
 
                         if not found:
                             if post is not None:
-                                post += "%s%s=%s" % (delimiter, name, value)
+                                if kb.postHint in (POST_HINT.JSON, POST_HINT.JSON_LIKE, POST_HINT.GRPC_WEB):
+                                    match = re.search(r"['\"]", post)
+                                    if match:
+                                        quote = match.group(0)
+                                        post = re.sub(r"\}\Z", "%s%s}" % (',' if re.search(r"\w", post) else "", "%s%s%s:%s" % (quote, name, quote, entry if entry.isdigit() else "%s%s%s" % (quote, entry.replace('\\', r'\\'), quote))), post)
+                                else:
+                                    post += "%s%s=%s" % (delimiter, name, entry)
                             elif get is not None:
-                                get += "%s%s=%s" % (delimiter, name, value)
+                                get += "%s%s=%s" % (delimiter, name, entry)
                             elif cookie is not None:
-                                cookie += "%s%s=%s" % (conf.cookieDel or DEFAULT_COOKIE_DELIMITER, name, value)
+                                cookie += "%s%s=%s" % (conf.cookieDel or DEFAULT_COOKIE_DELIMITER, name, entry)
 
         if not conf.skipUrlEncode:
-            get = urlencode(get, limit=True)
+            get = urlencode(get, safe="%%&=-_%s" % (conf.paramDel or ""), limit=True)
 
         if post is not None:
             if place not in (PLACE.POST, PLACE.CUSTOM_POST) and hasattr(post, UNENCODED_ORIGINAL_VALUE):
                 post = getattr(post, UNENCODED_ORIGINAL_VALUE)
             elif postUrlEncode:
                 post = urlencode(post, spaceplus=kb.postSpaceToPlus)
+
+        # The timeless path returns before the ordinary send, so run the '--safe-url'/'--safe-req' keep-alive
+        # for it too - a long extraction otherwise loses the session it depends on. Not under buildOnly:
+        # that is the timeless oracle assembling the very requests of this comparison, and counting each of
+        # them would fire the safe request several times per bit.
+        if (conf.safeFreq or 0) > 0 and not buildOnly:
+            kb.queryCounter += 1
+            if kb.queryCounter % conf.safeFreq == 0:
+                # Note: "safe" visit must not carry the payload (e.g. in case of Cookie injection)
+                if conf.safeUrl:
+                    Connect.getPage(url=conf.safeUrl, post=conf.safePost, cookie=conf.parameters.get(PLACE.COOKIE) if place == PLACE.COOKIE else cookie, direct=True, silent=True, ua=ua, referer=referer, host=host)
+                elif kb.safeReq:
+                    Connect.getPage(url=kb.safeReq.url, post=kb.safeReq.post, method=kb.safeReq.method, auxHeaders=kb.safeReq.headers, direct=True)
+
+        # When the timeless oracle is engaged (by action() at the start of extraction, so the heavy vector
+        # is in place before any payload is built), a boolean comparison is answered by relative HTTP/2
+        # response order instead of wall-clock timing - orders of magnitude faster and jitter-immune, and
+        # it skips the time-based statistical warm-up entirely. The comparison request is assembled exactly
+        # as it would be sent (buildOnly) and the bit is read from a coalesced pair. Not engaged -> timing.
+        if timeBasedCompare and kb.get("timeless") is not None:
+            from lib.request.timeless import CONNECTIVITY_ERRORS
+            from lib.request.timeless import TimelessUnusable
+            from lib.request.timeless import disengage
+            from lib.request.timeless import negatePayload
+            # Build the condition and negation requests through the SAME path (queryPage buildOnly on the
+            # raw pre-placement value) so the pair differs ONLY by the negated comparison - building cond
+            # from the already-placed uri/get/post while neg goes through fresh placement would make them
+            # non-corresponding and flip the order.
+            negValue = negatePayload(timelessOrigValue)
+            try:
+                if negValue is None:
+                    # No sentinels (a tamper script mangled them, or a non-timeless vector slipped through):
+                    # the symmetric oracle cannot be built, and there is no calibrated alternative reading.
+                    raise TimelessUnusable("payload carries no negatable comparison")
+                condSpec = Connect.queryPage(timelessOrigValue, place=place, buildOnly=True)
+                negSpec = Connect.queryPage(negValue, place=place, buildOnly=True)
+                return kb.timeless.readBitFromSpecs(condSpec, negSpec)
+            except CONNECTIVITY_ERRORS as ex:
+                # Either the oracle can no longer be trusted (a fresh connection failed calibration, the
+                # responses drifted off the calibrated control) or the target stopped negotiating HTTP/2
+                # altogether. Disengage - which restores the classic time-based vector - and answer this
+                # comparison the wall-clock way instead of crashing the scan. The payload in flight was
+                # forged from the heavy (millisecond) vector, so it has to be re-forged onto the restored
+                # one first: re-sending it as-is would read False whatever the truth.
+                warnMsg = "HTTP/2 timeless timing is no longer reliable ('%s'). Falling back to classic time-based" % getSafeExString(ex)
+                singleTimeWarnMessage(warnMsg)
+                disengage()
+                # Re-run this comparison the wall-clock way. The payload in flight was forged from the
+                # heavy (millisecond) vector, so re-sending it as-is would read False whatever the truth -
+                # the straggler rewrite at the top of queryPage puts it back on the restored vector, the
+                # same way it will handle the rest of this value.
+                if kb.get("timelessRestore"):
+                    return Connect.queryPage(timelessOrigValue, place=place, content=content, getRatioValue=getRatioValue, silent=silent, method=method, timeBasedCompare=timeBasedCompare, noteResponseTime=noteResponseTime, auxHeaders=auxHeaders, response=response, raise404=raise404, removeReflection=removeReflection, disableTampering=disableTampering, ignoreSecondOrder=ignoreSecondOrder)
 
         if timeBasedCompare and not conf.disableStats:
             if len(kb.responseTimes.get(kb.responseTimeMode, [])) < MIN_TIME_RESPONSES:
@@ -1387,8 +1786,8 @@ class Connect(object):
                 dataToStdout(warnMsg)
 
                 while len(kb.responseTimes[kb.responseTimeMode]) < MIN_TIME_RESPONSES:
-                    value = kb.responseTimePayload.replace(RANDOM_INTEGER_MARKER, str(randomInt(6))).replace(RANDOM_STRING_MARKER, randomStr()) if kb.responseTimePayload else kb.responseTimePayload
-                    Connect.queryPage(value=value, content=True, raise404=False)
+                    _ = kb.responseTimePayload.replace(RANDOM_INTEGER_MARKER, str(randomInt(6))).replace(RANDOM_STRING_MARKER, randomStr()) if kb.responseTimePayload else kb.responseTimePayload
+                    Connect.queryPage(value=_, content=True, raise404=False)
                     dataToStdout('.')
 
                 dataToStdout(" (done)\n")
@@ -1404,7 +1803,7 @@ class Connect(object):
 
                 deviation = stdev(kb.responseTimes[kb.responseTimeMode])
 
-                if deviation > WARN_TIME_STDEV:
+                if deviation is not None and deviation > WARN_TIME_STDEV:
                     kb.adjustTimeDelay = ADJUST_TIME_DELAY.DISABLE
 
                     warnMsg = "considerable lagging has been detected "
@@ -1413,15 +1812,9 @@ class Connect(object):
                     warnMsg += "10 or more)"
                     logger.critical(warnMsg)
 
-        if (conf.safeFreq or 0) > 0:
-            kb.queryCounter += 1
-            if kb.queryCounter % conf.safeFreq == 0:
-                if conf.safeUrl:
-                    Connect.getPage(url=conf.safeUrl, post=conf.safePost, cookie=cookie, direct=True, silent=True, ua=ua, referer=referer, host=host)
-                elif kb.safeReq:
-                    Connect.getPage(url=kb.safeReq.url, post=kb.safeReq.post, method=kb.safeReq.method, auxHeaders=kb.safeReq.headers)
-
         start = time.time()
+
+        authRefreshTime = threadData.authRefreshTime
 
         if kb.nullConnection and not content and not response and not timeBasedCompare:
             noteResponseTime = False
@@ -1448,6 +1841,12 @@ class Connect(object):
             finally:
                 kb.pageCompress = popValue()
 
+        # Timeless-timing oracle: after all placement/tampering, hand back the fully-assembled request
+        # (url, method, headers, post) instead of sending it, so two payloads can be coalesced into one
+        # multiplexed HTTP/2 pair (lib/request/timeless.py).
+        if buildOnly:
+            return Connect.getPage(url=uri, get=get, post=post, method=method, cookie=cookie, ua=ua, referer=referer, host=host, silent=True, auxHeaders=auxHeaders, buildOnly=True)
+
         if pageLength is None:
             try:
                 page, headers, code = Connect.getPage(url=uri, get=get, post=post, method=method, cookie=cookie, ua=ua, referer=referer, host=host, silent=silent, auxHeaders=auxHeaders, response=response, raise404=raise404, ignoreTimeout=timeBasedCompare)
@@ -1468,11 +1867,11 @@ class Connect(object):
                         if payload is None:
                             value = value.replace(kb.customInjectionMark, "")
                         else:
-                            value = re.sub(r"\w*%s" % re.escape(kb.customInjectionMark), payload, value)
+                            value = re.sub(r"\w*%s" % re.escape(kb.customInjectionMark), lambda _: payload, value)  # Note: function replacement inserts payload literally - avoids re.sub interpreting backslashes / group refs (e.g. \1, \g<...>) in the payload
                     return value
                 page, headers, code = Connect.getPage(url=_(kb.secondReq[0]), post=_(kb.secondReq[2]), method=kb.secondReq[1], cookie=kb.secondReq[3], silent=silent, auxHeaders=dict(auxHeaders, **dict(kb.secondReq[4])), response=response, raise404=False, ignoreTimeout=timeBasedCompare, refreshing=True)
 
-        threadData.lastQueryDuration = calculateDeltaSeconds(start)
+        threadData.lastQueryDuration = max(0, calculateDeltaSeconds(start) - (threadData.authRefreshTime - authRefreshTime))
 
         kb.originalCode = code if kb.originalCode is None else kb.originalCode
         kb.originalPage = page if kb.originalPage is None else kb.originalPage
@@ -1498,7 +1897,7 @@ class Connect(object):
             kb.permissionFlag = True
             singleTimeWarnMessage("potential permission problems detected ('%s')" % message)
 
-        patchHeaders(headers)
+        headers = patchHeaders(headers)
 
         if content or response:
             return page, headers, code

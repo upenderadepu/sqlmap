@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -40,14 +40,19 @@ from lib.core.exception import SqlmapConnectionException
 from lib.core.exception import SqlmapMissingMandatoryOptionException
 from lib.core.exception import SqlmapNoneDataException
 from lib.core.exception import SqlmapUnsupportedFeatureException
+from lib.core.settings import BINARY_FIELDS_TYPE_REGEX
+from lib.core.settings import MYSQL_BINARY_CAST_TYPE_REGEX
 from lib.core.settings import CHECK_ZERO_COLUMNS_THRESHOLD
 from lib.core.settings import CURRENT_DB
+from lib.core.settings import KEYSET_MIN_ROWS
 from lib.core.settings import METADB_SUFFIX
 from lib.core.settings import NULL
 from lib.core.settings import PLUS_ONE_DBMSES
 from lib.core.settings import UPPER_CASE_DBMSES
 from lib.request import inject
 from lib.utils.hash import attackDumpedTable
+from lib.utils.keysetdump import keysetDumpTable
+from lib.utils.keysetdump import resolveKeysetCursor
 from lib.utils.pivotdumptable import pivotDumpTable
 from thirdparty import six
 from thirdparty.six.moves import zip as _zip
@@ -68,7 +73,7 @@ class Entries(object):
                 warnMsg = "missing database parameter. sqlmap is going "
                 warnMsg += "to use the current database to enumerate "
                 warnMsg += "table(s) entries"
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
             conf.db = self.getCurrentDb()
 
@@ -111,11 +116,13 @@ class Entries(object):
         for tbl in tblList:
             tblList[tblList.index(tbl)] = safeSQLIdentificatorNaming(tbl, True)
 
+        binaryFields = conf.binaryFields  # user-provided '--binary-fields' (auto-detected ones are added per-table)
+
         for tbl in tblList:
             if kb.dumpKeyboardInterrupt:
                 break
 
-            if conf.exclude and re.search(conf.exclude, tbl, re.I) is not None:
+            if conf.exclude and re.search(conf.exclude, unsafeSQLIdentificatorNaming(tbl), re.I) is not None:
                 infoMsg = "skipping table '%s'" % unsafeSQLIdentificatorNaming(tbl)
                 singleTimeLogMessage(infoMsg)
                 continue
@@ -134,15 +141,17 @@ class Entries(object):
                     kb.dumpTable = "%s:%s" % (conf.db, tbl)
                 elif Backend.isDbms(DBMS.SQLITE):
                     kb.dumpTable = tbl
+                elif METADB_SUFFIX.upper() in conf.db.upper():
+                    kb.dumpTable = tbl
                 else:
                     kb.dumpTable = "%s.%s" % (conf.db, tbl)
 
                 if safeSQLIdentificatorNaming(conf.db) not in kb.data.cachedColumns or safeSQLIdentificatorNaming(tbl, True) not in kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)] or not kb.data.cachedColumns[safeSQLIdentificatorNaming(conf.db)][safeSQLIdentificatorNaming(tbl, True)]:
                     warnMsg = "unable to enumerate the columns for table '%s'" % unsafeSQLIdentificatorNaming(tbl)
-                    if METADB_SUFFIX not in conf.db:
+                    if METADB_SUFFIX.upper() not in conf.db.upper():
                         warnMsg += " in database '%s'" % unsafeSQLIdentificatorNaming(conf.db)
                     warnMsg += ", skipping" if len(tblList) > 1 else ""
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
                     continue
 
@@ -154,21 +163,34 @@ class Entries(object):
 
                 if not colList:
                     warnMsg = "skipping table '%s'" % unsafeSQLIdentificatorNaming(tbl)
-                    if METADB_SUFFIX not in conf.db:
+                    if METADB_SUFFIX.upper() not in conf.db.upper():
                         warnMsg += " in database '%s'" % unsafeSQLIdentificatorNaming(conf.db)
                     warnMsg += " (no usable column names)"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
                     continue
 
                 kb.dumpColumns = [unsafeSQLIdentificatorNaming(_) for _ in colList]
                 colNames = colString = ','.join(column for column in colList)
                 rootQuery = queries[Backend.getIdentifiedDbms()].dump_table
 
+                # Auto-treat binary-typed columns (blob/varbinary/bytea/image/raw) as '--binary-fields', so their
+                # raw bytes (e.g. password hashes stored in binary form) are hex-extracted instead of being
+                # silently truncated at a NUL / mangled by the text channel (issues #8, #582, #2827). The column
+                # type is already known from the enumeration above, so this costs no extra request.
+                # (PostgreSQL excluded: its bytea already renders as readable '\xHEX' through the default text
+                # cast, and its hex path needs text input, so auto-hexing would double-encode.)
+                # MySQL BIT/spatial store raw bytes the NCHAR text-cast NULLs (unlike MSSQL/PostgreSQL 'bit', which render fine), so hex them too
+                autoBinary = [] if Backend.isDbms(DBMS.PGSQL) else [column for column in colList if columns.get(column) and (re.search(BINARY_FIELDS_TYPE_REGEX, getUnicode(columns[column])) or (Backend.isDbms(DBMS.MYSQL) and re.search(MYSQL_BINARY_CAST_TYPE_REGEX, getUnicode(columns[column]))))]
+                conf.binaryFields = (list(binaryFields) if binaryFields else []) + [_ for _ in autoBinary if not (binaryFields and _ in binaryFields)]
+                if autoBinary:
+                    debugMsg = "auto-treating binary column(s) '%s' as binary fields" % ', '.join(unsafeSQLIdentificatorNaming(_) for _ in autoBinary)
+                    logger.debug(debugMsg)
+
                 infoMsg = "fetching entries"
                 if conf.col:
                     infoMsg += " of column(s) '%s'" % colNames
                 infoMsg += " for table '%s'" % unsafeSQLIdentificatorNaming(tbl)
-                if METADB_SUFFIX not in conf.db:
+                if METADB_SUFFIX.upper() not in conf.db.upper():
                     infoMsg += " in database '%s'" % unsafeSQLIdentificatorNaming(conf.db)
                 logger.info(infoMsg)
 
@@ -179,13 +201,60 @@ class Entries(object):
 
                 entriesCount = 0
 
-                if any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct:
+                def _dumpCountQuery():
+                    if Backend.getIdentifiedDbms() in (DBMS.ORACLE, DBMS.DB2, DBMS.DERBY, DBMS.ALTIBASE, DBMS.MIMERSQL, DBMS.SNOWFLAKE):
+                        _ = rootQuery.blind.count % (tbl.upper() if not conf.db else ("%s.%s" % (conf.db.upper(), tbl.upper())))
+                    elif Backend.getIdentifiedDbms() in (DBMS.SQLITE, DBMS.MAXDB, DBMS.ACCESS, DBMS.FIREBIRD, DBMS.MCKOI, DBMS.EXTREMEDB, DBMS.RAIMA):
+                        _ = rootQuery.blind.count % tbl
+                    elif Backend.getIdentifiedDbms() in (DBMS.SYBASE, DBMS.MSSQL):
+                        _ = rootQuery.blind.count % ("%s.%s" % (conf.db, tbl)) if conf.db else tbl
+                    elif Backend.isDbms(DBMS.INFORMIX):
+                        _ = rootQuery.blind.count % (conf.db, tbl)
+                    else:
+                        _ = rootQuery.blind.count % (conf.db, tbl)
+                    return agent.whereQuery(_)
+
+                # Keyset (seek) pagination for the error/query (inband) path too, not just the blind path below.
+                # It fetches every cell value-anchored (MAX(col) WHERE key=K_r on a unique integer key), so the
+                # per-cell retrievals of one row are pinned to the SAME physical row regardless of scan order,
+                # threads or MVCC - unlike ORDER BY ... LIMIT/OFFSET, which silently misaligns cells once a
+                # stable order is unavailable. UNION is intrinsically aligned (whole-row), so it is never preempted.
+                keysetDone = False
+                if not conf.direct and not conf.noKeyset and not isTechniqueAvailable(PAYLOAD.TECHNIQUE.UNION) \
+                        and any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)):
+                    count = inject.getValue(_dumpCountQuery(), expected=EXPECTED.INT, charsetType=CHARSET_TYPE.DIGITS)
+                    if isNumPosStrValue(count) and (conf.keyset or int(count) >= KEYSET_MIN_ROWS):
+                        keysetCursor = resolveKeysetCursor(tbl, colList)
+                        if keysetCursor:
+                            infoMsg = "using keyset (seek) pagination on column(s) '%s' " % ', '.join(keysetCursor)
+                            infoMsg += "for table '%s'" % unsafeSQLIdentificatorNaming(tbl)
+                            logger.info(infoMsg)
+
+                            try:
+                                # None when the walk gave up mid-table: nothing is kept, so the
+                                # standard dump below redoes it rather than showing a short table
+                                result = keysetDumpTable(tbl, colList, int(count), keysetCursor)
+
+                                if result is not None:
+                                    entries, lengths = result
+                                    for column, columnEntries in entries.items():
+                                        length = max(lengths[column], getConsoleLength(column))
+                                        kb.data.dumpedTable[column] = {"length": length, "values": columnEntries}
+                                        entriesCount = len(columnEntries)
+                                    keysetDone = bool(kb.data.dumpedTable)
+                            except KeyboardInterrupt:
+                                kb.dumpKeyboardInterrupt = True
+                                clearConsoleLine()
+                                warnMsg = "Ctrl+C detected in dumping phase"
+                                logger.warning(warnMsg)
+
+                if not keysetDone and (any(isTechniqueAvailable(_) for _ in (PAYLOAD.TECHNIQUE.UNION, PAYLOAD.TECHNIQUE.ERROR, PAYLOAD.TECHNIQUE.QUERY)) or conf.direct):
                     entries = []
                     query = None
 
-                    if Backend.getIdentifiedDbms() in (DBMS.ORACLE, DBMS.DB2, DBMS.DERBY, DBMS.ALTIBASE, DBMS.MIMERSQL):
+                    if Backend.getIdentifiedDbms() in (DBMS.ORACLE, DBMS.DB2, DBMS.DERBY, DBMS.ALTIBASE, DBMS.MIMERSQL, DBMS.SNOWFLAKE):
                         query = rootQuery.inband.query % (colString, tbl.upper() if not conf.db else ("%s.%s" % (conf.db.upper(), tbl.upper())))
-                    elif Backend.getIdentifiedDbms() in (DBMS.SQLITE, DBMS.ACCESS, DBMS.FIREBIRD, DBMS.MAXDB, DBMS.MCKOI, DBMS.EXTREMEDB, DBMS.RAIMA):
+                    elif Backend.getIdentifiedDbms() in (DBMS.SQLITE, DBMS.ACCESS, DBMS.FIREBIRD, DBMS.MAXDB, DBMS.MCKOI, DBMS.EXTREMEDB, DBMS.RAIMA, DBMS.SNOWFLAKE):
                         query = rootQuery.inband.query % (colString, tbl)
                     elif Backend.getIdentifiedDbms() in (DBMS.SYBASE, DBMS.MSSQL):
                         # Partial inband and error
@@ -208,7 +277,7 @@ class Entries(object):
                                         for index in indexRange:
                                             row = []
                                             for column in colList:
-                                                query = rootQuery.blind.query3 % (column, column, table, index)
+                                                query = rootQuery.blind.query3 % (column, column, prioritySortColumns(colList)[0], table, index)
                                                 query = agent.whereQuery(query)
                                                 value = inject.getValue(query, blind=False, time=False, dump=True) or ""
                                                 row.append(value)
@@ -222,7 +291,7 @@ class Entries(object):
                                         kb.dumpKeyboardInterrupt = True
                                         clearConsoleLine()
                                         warnMsg = "Ctrl+C detected in dumping phase"
-                                        logger.warn(warnMsg)
+                                        logger.warning(warnMsg)
 
                             if isNoneValue(entries) and not kb.dumpKeyboardInterrupt:
                                 try:
@@ -232,14 +301,14 @@ class Entries(object):
                                     kb.dumpKeyboardInterrupt = True
                                     clearConsoleLine()
                                     warnMsg = "Ctrl+C detected in dumping phase"
-                                    logger.warn(warnMsg)
+                                    logger.warning(warnMsg)
 
                                 if retVal:
                                     entries, _ = retVal
                                     entries = BigArray(_zip(*[entries[colName] for colName in colList]))
                         else:
                             query = rootQuery.inband.query % (colString, conf.db, tbl)
-                    elif Backend.getIdentifiedDbms() in (DBMS.MYSQL, DBMS.PGSQL, DBMS.HSQLDB, DBMS.H2, DBMS.VERTICA, DBMS.PRESTO, DBMS.CRATEDB, DBMS.CACHE, DBMS.VIRTUOSO):
+                    elif Backend.getIdentifiedDbms() in (DBMS.MYSQL, DBMS.PGSQL, DBMS.HSQLDB, DBMS.H2, DBMS.VERTICA, DBMS.PRESTO, DBMS.CRATEDB, DBMS.CACHE, DBMS.VIRTUOSO, DBMS.CLICKHOUSE, DBMS.SPANNER):
                         query = rootQuery.inband.query % (colString, conf.db, tbl, prioritySortColumns(colList)[0])
                     else:
                         query = rootQuery.inband.query % (colString, conf.db, tbl)
@@ -254,7 +323,7 @@ class Entries(object):
                             kb.dumpKeyboardInterrupt = True
                             clearConsoleLine()
                             warnMsg = "Ctrl+C detected in dumping phase"
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
                     if not isNoneValue(entries):
                         if isinstance(entries, six.string_types):
@@ -269,7 +338,9 @@ class Entries(object):
                                 kb.data.dumpedTable[column] = {"length": len(column), "values": BigArray()}
 
                             for entry in entries:
-                                if entry is None or len(entry) == 0:
+                                # skip a missing/empty ROW container, but NOT an empty-string CELL value
+                                # (single-column dumps yield bare strings; len("")==0 must not drop the row)
+                                if entry is None or (isListLike(entry) and len(entry) == 0):
                                     continue
 
                                 if isinstance(entry, six.string_types):
@@ -292,7 +363,7 @@ class Entries(object):
                     infoMsg += "in database '%s'" % unsafeSQLIdentificatorNaming(conf.db)
                     logger.info(infoMsg)
 
-                    if Backend.getIdentifiedDbms() in (DBMS.ORACLE, DBMS.DB2, DBMS.DERBY, DBMS.ALTIBASE, DBMS.MIMERSQL):
+                    if Backend.getIdentifiedDbms() in (DBMS.ORACLE, DBMS.DB2, DBMS.DERBY, DBMS.ALTIBASE, DBMS.MIMERSQL, DBMS.SNOWFLAKE):
                         query = rootQuery.blind.count % (tbl.upper() if not conf.db else ("%s.%s" % (conf.db.upper(), tbl.upper())))
                     elif Backend.getIdentifiedDbms() in (DBMS.SQLITE, DBMS.MAXDB, DBMS.ACCESS, DBMS.FIREBIRD, DBMS.MCKOI, DBMS.EXTREMEDB, DBMS.RAIMA):
                         query = rootQuery.blind.count % tbl
@@ -307,17 +378,40 @@ class Entries(object):
 
                     count = inject.getValue(query, union=False, error=False, expected=EXPECTED.INT, charsetType=CHARSET_TYPE.DIGITS)
 
+                    # keyset (seek) pagination: forced with --keyset, automatic for large tables, off with --no-keyset
+                    keysetCursor = resolveKeysetCursor(tbl, colList) if (not conf.noKeyset and isNumPosStrValue(count) and (conf.keyset or int(count) >= KEYSET_MIN_ROWS)) else None
+
                     lengths = {}
                     entries = {}
+
+                    # Attempted before the chain below so that a walk which gave up mid-table (None) can
+                    # fall through to the standard OFFSET paths - a short table is worse than a slow one.
+                    # An interrupted walk keeps the chain out of a re-dump by claiming the branch itself.
+                    keysetResult = None
+
+                    if keysetCursor:
+                        infoMsg = "using keyset (seek) pagination on column(s) '%s' " % ', '.join(keysetCursor)
+                        infoMsg += "for table '%s'" % unsafeSQLIdentificatorNaming(tbl)
+                        logger.info(infoMsg)
+
+                        try:
+                            keysetResult = keysetDumpTable(tbl, colList, count, keysetCursor)
+                        except KeyboardInterrupt:
+                            kb.dumpKeyboardInterrupt = True
+                            clearConsoleLine()
+                            warnMsg = "Ctrl+C detected in dumping phase"
+                            logger.warning(warnMsg)
+
+                            keysetResult = (entries, lengths)
 
                     if count == 0:
                         warnMsg = "table '%s' " % unsafeSQLIdentificatorNaming(tbl)
                         warnMsg += "in database '%s' " % unsafeSQLIdentificatorNaming(conf.db)
                         warnMsg += "appears to be empty"
-                        logger.warn(warnMsg)
+                        logger.warning(warnMsg)
 
                         for column in colList:
-                            lengths[column] = len(column)
+                            lengths[column] = getConsoleLength(column)
                             entries[column] = []
 
                     elif not isNumPosStrValue(count):
@@ -326,9 +420,12 @@ class Entries(object):
                             warnMsg += "column(s) '%s' " % colNames
                         warnMsg += "entries for table '%s' " % unsafeSQLIdentificatorNaming(tbl)
                         warnMsg += "in database '%s'" % unsafeSQLIdentificatorNaming(conf.db)
-                        logger.warn(warnMsg)
+                        logger.warning(warnMsg)
 
                         continue
+
+                    elif keysetResult is not None:
+                        entries, lengths = keysetResult
 
                     elif Backend.getIdentifiedDbms() in (DBMS.ACCESS, DBMS.SYBASE, DBMS.MAXDB, DBMS.MSSQL, DBMS.INFORMIX, DBMS.MCKOI, DBMS.RAIMA):
                         if Backend.getIdentifiedDbms() in (DBMS.ACCESS, DBMS.MCKOI, DBMS.RAIMA):
@@ -348,7 +445,7 @@ class Entries(object):
 
                                 for index in indexRange:
                                     for column in colList:
-                                        query = rootQuery.blind.query3 % (column, column, table, index)
+                                        query = rootQuery.blind.query3 % (column, column, prioritySortColumns(colList)[0], table, index)
                                         query = agent.whereQuery(query)
 
                                         value = inject.getValue(query, union=False, error=False, dump=True) or ""
@@ -359,14 +456,14 @@ class Entries(object):
                                         if column not in entries:
                                             entries[column] = BigArray()
 
-                                        lengths[column] = max(lengths[column], len(DUMP_REPLACEMENTS.get(getUnicode(value), getUnicode(value))))
+                                        lengths[column] = max(lengths[column], getConsoleLength(DUMP_REPLACEMENTS.get(getUnicode(value), getUnicode(value))))
                                         entries[column].append(value)
 
                             except KeyboardInterrupt:
                                 kb.dumpKeyboardInterrupt = True
                                 clearConsoleLine()
                                 warnMsg = "Ctrl+C detected in dumping phase"
-                                logger.warn(warnMsg)
+                                logger.warning(warnMsg)
 
                         if not entries and not kb.dumpKeyboardInterrupt:
                             try:
@@ -376,7 +473,7 @@ class Entries(object):
                                 kb.dumpKeyboardInterrupt = True
                                 clearConsoleLine()
                                 warnMsg = "Ctrl+C detected in dumping phase"
-                                logger.warn(warnMsg)
+                                logger.warning(warnMsg)
 
                             if retVal:
                                 entries, lengths = retVal
@@ -397,50 +494,89 @@ class Entries(object):
                                     debugMsg += "dumped as it appears to be empty"
                                     logger.debug(debugMsg)
 
+                        def cellQuery(column, index):
+                            if Backend.getIdentifiedDbms() in (DBMS.MYSQL, DBMS.PGSQL, DBMS.HSQLDB, DBMS.H2, DBMS.VERTICA, DBMS.PRESTO, DBMS.CRATEDB, DBMS.CACHE, DBMS.CLICKHOUSE, DBMS.SNOWFLAKE, DBMS.SPANNER):
+                                query = rootQuery.blind.query % (agent.preprocessField(tbl, column), conf.db, conf.tbl, prioritySortColumns(colList)[0], index)
+                            elif Backend.getIdentifiedDbms() in (DBMS.HANA, DBMS.CUBRID):
+                                query = rootQuery.blind.query % (agent.preprocessField(tbl, column), conf.db, tbl, prioritySortColumns(colList)[0], index)
+                            elif Backend.isDbms(DBMS.MONETDB):
+                                query = rootQuery.blind.query % (agent.preprocessField(tbl, column), prioritySortColumns(colList)[0], conf.db, tbl, index)
+                            elif Backend.isDbms(DBMS.DB2):
+                                query = rootQuery.blind.query % (prioritySortColumns(colList)[0], agent.preprocessField(tbl, column), tbl.upper() if not conf.db else ("%s.%s" % (conf.db.upper(), tbl.upper())), index)
+                            elif Backend.isDbms(DBMS.ORACLE):
+                                query = rootQuery.blind.query % (agent.preprocessField(tbl, column), tbl.upper() if not conf.db else ("%s.%s" % (conf.db.upper(), tbl.upper())), index)
+                            elif Backend.getIdentifiedDbms() in (DBMS.MIMERSQL, DBMS.DERBY, DBMS.ALTIBASE):
+                                query = rootQuery.blind.query % (agent.preprocessField(tbl, column), tbl.upper() if not conf.db else ("%s.%s" % (conf.db.upper(), tbl.upper())), prioritySortColumns(colList)[0], index)
+                            elif Backend.isDbms(DBMS.SQLITE):
+                                query = rootQuery.blind.query % (agent.preprocessField(tbl, column), tbl, index)
+                            elif Backend.isDbms(DBMS.EXTREMEDB):
+                                query = rootQuery.blind.query % (agent.preprocessField(tbl, column), tbl, prioritySortColumns(colList)[0], index)
+                            elif Backend.isDbms(DBMS.FIREBIRD):
+                                query = rootQuery.blind.query % (index, agent.preprocessField(tbl, column), tbl, prioritySortColumns(colList)[0])
+                            elif Backend.getIdentifiedDbms() in (DBMS.INFORMIX, DBMS.VIRTUOSO, DBMS.FRONTBASE):
+                                query = rootQuery.blind.query % (index, agent.preprocessField(tbl, column), conf.db, tbl, prioritySortColumns(colList)[0])
+                            else:
+                                query = rootQuery.blind.query % (agent.preprocessField(tbl, column), conf.db, tbl, index)
+
+                            return agent.whereQuery(query)
+
                         try:
-                            for index in indexRange:
+                            # Value-parallel dumping: one whole cell per worker, decoded sequentially, so there
+                            # is NO per-cell LENGTH() probe (the position-parallel path needs one to split a
+                            # value's characters across threads) and the per-column Huffman model + low-cardinality
+                            # guessing engage under concurrency. Used for the boolean channel with '--threads', and
+                            # for the HTTP/2 timeless oracle (its per-thread connections make concurrency safe and
+                            # deterministic). Also used under '--eta' - including single-threaded time-based, the
+                            # slowest channel - to drive one whole-job progress bar/ETA (how long the dump takes)
+                            # instead of a per-cell counter. Eligibility (channel x threads/eta) is valueParallelEligible();
+                            # '--dns-domain' keeps the classic loop (its OOB fast path bypasses bisection).
+                            if not conf.dnsDomain and inject.valueParallelEligible():
+                                # One value-parallel pass over every (non-empty) cell, so there is a single
+                                # thread pool and values stream live as they complete - out of order, exactly
+                                # like the error/union dumps - instead of a silent progress counter.
+                                nonEmpty = [_ for _ in colList if _ not in emptyColumns]
+                                tasks = [(column, index) for column in nonEmpty for index in indexRange]
+                                retrieved = inject._threadedInferenceValues(lambda pair: cellQuery(pair[0], pair[1]), tasks, charsetType=None, dump=True) if tasks else []
+                                retrieved = retrieved if retrieved is not None else [None] * len(tasks)
+
+                                offset = 0
                                 for column in colList:
-                                    value = ""
+                                    entries[column] = BigArray()
+                                    lengths.setdefault(column, 0)
 
-                                    if column not in lengths:
-                                        lengths[column] = 0
-
-                                    if column not in entries:
-                                        entries[column] = BigArray()
-
-                                    if Backend.getIdentifiedDbms() in (DBMS.MYSQL, DBMS.PGSQL, DBMS.HSQLDB, DBMS.H2, DBMS.VERTICA, DBMS.PRESTO, DBMS.CRATEDB, DBMS.CACHE):
-                                        query = rootQuery.blind.query % (agent.preprocessField(tbl, column), conf.db, conf.tbl, sorted(colList, key=len)[0], index)
-                                    elif Backend.getIdentifiedDbms() in (DBMS.ORACLE, DBMS.DB2, DBMS.DERBY, DBMS.ALTIBASE,):
-                                        query = rootQuery.blind.query % (agent.preprocessField(tbl, column), tbl.upper() if not conf.db else ("%s.%s" % (conf.db.upper(), tbl.upper())), index)
-                                    elif Backend.getIdentifiedDbms() in (DBMS.MIMERSQL,):
-                                        query = rootQuery.blind.query % (agent.preprocessField(tbl, column), tbl.upper() if not conf.db else ("%s.%s" % (conf.db.upper(), tbl.upper())), sorted(colList, key=len)[0], index)
-                                    elif Backend.getIdentifiedDbms() in (DBMS.SQLITE, DBMS.EXTREMEDB):
-                                        query = rootQuery.blind.query % (agent.preprocessField(tbl, column), tbl, index)
-                                    elif Backend.isDbms(DBMS.FIREBIRD):
-                                        query = rootQuery.blind.query % (index, agent.preprocessField(tbl, column), tbl)
-                                    elif Backend.getIdentifiedDbms() in (DBMS.INFORMIX, DBMS.VIRTUOSO):
-                                        query = rootQuery.blind.query % (index, agent.preprocessField(tbl, column), conf.db, tbl, sorted(colList, key=len)[0])
-                                    elif Backend.isDbms(DBMS.FRONTBASE):
-                                        query = rootQuery.blind.query % (index, agent.preprocessField(tbl, column), conf.db, tbl)
+                                    if column in emptyColumns:
+                                        values = [NULL] * len(indexRange)
                                     else:
-                                        query = rootQuery.blind.query % (agent.preprocessField(tbl, column), conf.db, tbl, index)
+                                        values = retrieved[offset:offset + len(indexRange)]
+                                        offset += len(indexRange)
 
-                                    query = agent.whereQuery(query)
+                                    for value in values:
+                                        value = '' if value is None else value
+                                        lengths[column] = max(lengths[column], getConsoleLength(DUMP_REPLACEMENTS.get(getUnicode(value), getUnicode(value))))
+                                        entries[column].append(value)
+                            else:
+                                for index in indexRange:
+                                    for column in colList:
+                                        if column not in lengths:
+                                            lengths[column] = 0
 
-                                    value = NULL if column in emptyColumns else inject.getValue(query, union=False, error=False, dump=True)
-                                    value = '' if value is None else value
+                                        if column not in entries:
+                                            entries[column] = BigArray()
 
-                                    lengths[column] = max(lengths[column], len(DUMP_REPLACEMENTS.get(getUnicode(value), getUnicode(value))))
-                                    entries[column].append(value)
+                                        value = NULL if column in emptyColumns else inject.getValue(cellQuery(column, index), union=False, error=False, dump=True)
+                                        value = '' if value is None else value
+
+                                        lengths[column] = max(lengths[column], getConsoleLength(DUMP_REPLACEMENTS.get(getUnicode(value), getUnicode(value))))
+                                        entries[column].append(value)
 
                         except KeyboardInterrupt:
                             kb.dumpKeyboardInterrupt = True
                             clearConsoleLine()
                             warnMsg = "Ctrl+C detected in dumping phase"
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
                     for column, columnEntries in entries.items():
-                        length = max(lengths[column], len(column))
+                        length = max(lengths[column], getConsoleLength(column))
 
                         kb.data.dumpedTable[column] = {"length": length, "values": columnEntries}
 
@@ -452,17 +588,20 @@ class Entries(object):
                         warnMsg += "of columns '%s' " % colNames
                     warnMsg += "for table '%s' " % unsafeSQLIdentificatorNaming(tbl)
                     warnMsg += "in database '%s'%s" % (unsafeSQLIdentificatorNaming(conf.db), " (permission denied)" if kb.permissionFlag else "")
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
                 else:
                     kb.data.dumpedTable["__infos__"] = {"count": entriesCount,
                                                         "table": safeSQLIdentificatorNaming(tbl, True),
                                                         "db": safeSQLIdentificatorNaming(conf.db)}
-                    try:
-                        attackDumpedTable()
-                    except (IOError, OSError) as ex:
-                        errMsg = "an error occurred while attacking "
-                        errMsg += "table dump ('%s')" % getSafeExString(ex)
-                        logger.critical(errMsg)
+
+                    if not conf.disableHashing:
+                        try:
+                            attackDumpedTable()
+                        except (IOError, OSError) as ex:
+                            errMsg = "an error occurred while attacking "
+                            errMsg += "table dump ('%s')" % getSafeExString(ex)
+                            logger.critical(errMsg)
+
                     conf.dumper.dbTableValues(kb.data.dumpedTable)
 
             except SqlmapConnectionException as ex:
@@ -473,6 +612,7 @@ class Entries(object):
             finally:
                 kb.dumpColumns = None
                 kb.dumpTable = None
+                conf.binaryFields = binaryFields  # restore user-provided value (drop this table's auto-detected ones)
 
     def dumpAll(self):
         if conf.db is not None and conf.tbl is None:

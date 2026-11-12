@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -21,6 +21,7 @@ from lib.core.settings import EXTREMEDB_ALIASES
 from lib.core.settings import FIREBIRD_ALIASES
 from lib.core.settings import FRONTBASE_ALIASES
 from lib.core.settings import H2_ALIASES
+from lib.core.settings import HANA_ALIASES
 from lib.core.settings import HSQLDB_ALIASES
 from lib.core.settings import INFORMIX_ALIASES
 from lib.core.settings import MAXDB_ALIASES
@@ -38,6 +39,9 @@ from lib.core.settings import SQLITE_ALIASES
 from lib.core.settings import SYBASE_ALIASES
 from lib.core.settings import VERTICA_ALIASES
 from lib.core.settings import VIRTUOSO_ALIASES
+from lib.core.settings import CLICKHOUSE_ALIASES
+from lib.core.settings import SNOWFLAKE_ALIASES
+from lib.core.settings import SPANNER_ALIASES
 
 FIREBIRD_TYPES = {
     261: "BLOB",
@@ -120,6 +124,28 @@ SYBASE_TYPES = {
     3: "binary",
     19: "text",
     20: "image",
+    # the rest of master..systypes on ASE 15/16 - without these, --schema prints the raw user type number
+    # for columns as ordinary as bigint, date and univarchar
+    34: "unichar",
+    35: "univarchar",
+    36: "unitext",
+    37: "date",
+    38: "time",
+    39: "daten",
+    40: "timen",
+    42: "longsysname",
+    43: "bigint",
+    44: "usmallint",
+    45: "uint",
+    46: "ubigint",
+    47: "uintn",
+    48: "bigdatetime",
+    49: "bigtime",
+    50: "bigdatetimen",
+    51: "bigtimen",
+    53: "text_locator",
+    54: "image_locator",
+    55: "unitext_locator",
 }
 
 ALTIBASE_TYPES = {
@@ -176,7 +202,7 @@ MYSQL_PRIVS = {
 PGSQL_PRIVS = {
     1: "createdb",
     2: "super",
-    3: "catupd",
+    3: "replication",
 }
 
 # Reference(s): http://stackoverflow.com/a/17672504
@@ -224,14 +250,14 @@ DBMS_DICT = {
     DBMS.MSSQL: (MSSQL_ALIASES, "python-pymssql", "https://github.com/pymssql/pymssql", "mssql+pymssql"),
     DBMS.MYSQL: (MYSQL_ALIASES, "python-pymysql", "https://github.com/PyMySQL/PyMySQL", "mysql"),
     DBMS.PGSQL: (PGSQL_ALIASES, "python-psycopg2", "https://github.com/psycopg/psycopg2", "postgresql"),
-    DBMS.ORACLE: (ORACLE_ALIASES, "python cx_Oracle", "https://oracle.github.io/python-cx_Oracle/", "oracle"),
+    DBMS.ORACLE: (ORACLE_ALIASES, "python-oracledb", "https://oracle.github.io/python-oracledb/", "oracle"),
     DBMS.SQLITE: (SQLITE_ALIASES, "python-sqlite", "https://docs.python.org/3/library/sqlite3.html", "sqlite"),
     DBMS.ACCESS: (ACCESS_ALIASES, "python-pyodbc", "https://github.com/mkleehammer/pyodbc", "access"),
-    DBMS.FIREBIRD: (FIREBIRD_ALIASES, "python-kinterbasdb", "http://kinterbasdb.sourceforge.net/", "firebird"),
-    DBMS.MAXDB: (MAXDB_ALIASES, None, None, "maxdb"),
-    DBMS.SYBASE: (SYBASE_ALIASES, "python-pymssql", "https://github.com/pymssql/pymssql", "sybase"),
+    DBMS.FIREBIRD: (FIREBIRD_ALIASES, "python3-firebirdsql", "https://github.com/nakagami/pyfirebirdsql/", "firebird"),
+    DBMS.MAXDB: (MAXDB_ALIASES, None, None, None),  # 'maxdb'/'sapdb' SQLAlchemy dialect was removed long ago; a dead dialect only produces a misleading warning
+    DBMS.SYBASE: (SYBASE_ALIASES, "python-pymssql", "https://github.com/pymssql/pymssql", None),  # 'sybase' SQLAlchemy dialect was removed in 1.4 (external replacement abandoned); pymssql/dbwire cover '-d', so a dead dialect only wastes an attempt and shows a misleading warning
     DBMS.DB2: (DB2_ALIASES, "python ibm-db", "https://github.com/ibmdb/python-ibmdb", "ibm_db_sa"),
-    DBMS.HSQLDB: (HSQLDB_ALIASES, "python jaydebeapi & python-jpype", "https://pypi.python.org/pypi/JayDeBeApi/ & http://jpype.sourceforge.net/", None),
+    DBMS.HSQLDB: (HSQLDB_ALIASES, "python jaydebeapi & python-jpype", "https://pypi.python.org/pypi/JayDeBeApi/ & https://github.com/jpype-project/jpype", None),
     DBMS.H2: (H2_ALIASES, None, None, None),
     DBMS.INFORMIX: (INFORMIX_ALIASES, "python ibm-db", "https://github.com/ibmdb/python-ibmdb", "ibm_db_sa"),
     DBMS.MONETDB: (MONETDB_ALIASES, "pymonetdb", "https://github.com/gijzelaerr/pymonetdb", "monetdb"),
@@ -241,13 +267,34 @@ DBMS_DICT = {
     DBMS.PRESTO: (PRESTO_ALIASES, "presto-python-client", "https://github.com/prestodb/presto-python-client", None),
     DBMS.ALTIBASE: (ALTIBASE_ALIASES, None, None, None),
     DBMS.MIMERSQL: (MIMERSQL_ALIASES, "mimerpy", "https://github.com/mimersql/MimerPy", None),
-    DBMS.CRATEDB: (CRATEDB_ALIASES, "python-psycopg2", "http://initd.org/psycopg/", "postgresql"),
+    DBMS.CLICKHOUSE: (CLICKHOUSE_ALIASES, "clickhouse_connect", "https://github.com/ClickHouse/clickhouse-connect", None),
+    DBMS.CRATEDB: (CRATEDB_ALIASES, "python-psycopg2", "https://github.com/psycopg/psycopg2", "postgresql"),
     DBMS.CUBRID: (CUBRID_ALIASES, "CUBRID-Python", "https://github.com/CUBRID/cubrid-python", None),
-    DBMS.CACHE: (CACHE_ALIASES, "python jaydebeapi & python-jpype", "https://pypi.python.org/pypi/JayDeBeApi/ & http://jpype.sourceforge.net/", None),
+    DBMS.CACHE: (CACHE_ALIASES, "python jaydebeapi & python-jpype", "https://pypi.python.org/pypi/JayDeBeApi/ & https://github.com/jpype-project/jpype", None),
     DBMS.EXTREMEDB: (EXTREMEDB_ALIASES, None, None, None),
     DBMS.FRONTBASE: (FRONTBASE_ALIASES, None, None, None),
     DBMS.RAIMA: (RAIMA_ALIASES, None, None, None),
     DBMS.VIRTUOSO: (VIRTUOSO_ALIASES, None, None, None),
+    DBMS.SNOWFLAKE: (SNOWFLAKE_ALIASES, None, None, "snowflake"),
+    DBMS.SPANNER: (SPANNER_ALIASES, None, None, "spanner"),
+    DBMS.HANA: (HANA_ALIASES, "hdbcli", "https://pypi.org/project/hdbcli/", "hana"),
+}
+
+# DBMS -> pure-python 'extra/dbwire' wire-protocol module, used as a dependency-free '-d' fallback when
+# neither a native driver nor SQLAlchemy is installed (a single module serves the whole compatible family,
+# e.g. 'postgres' also covers CockroachDB/CrateDB/Redshift/Greenplum)
+DBWIRE_MODULES = {
+    DBMS.PGSQL: "postgres",
+    DBMS.CRATEDB: "postgres",  # CrateDB speaks the PostgreSQL wire protocol
+    DBMS.MYSQL: "mysql",
+    DBMS.MSSQL: "tds",
+    DBMS.SYBASE: "sybase",  # ASE speaks TDS 5.0, a different login and token dialect than Microsoft's 7.x
+    DBMS.CLICKHOUSE: "clickhouse",
+    DBMS.MONETDB: "monetdb",
+    DBMS.PRESTO: "presto",
+    DBMS.FIREBIRD: "firebird",
+    DBMS.VERTICA: "postgres",  # Vertica speaks a PostgreSQL-v3-derived wire protocol (trust/cleartext/md5 auth)
+    DBMS.CUBRID: "cubrid",
 }
 
 # Reference: https://blog.jooq.org/tag/sysibm-sysdummy1/
@@ -255,37 +302,44 @@ FROM_DUMMY_TABLE = {
     DBMS.ORACLE: " FROM DUAL",
     DBMS.ACCESS: " FROM MSysAccessObjects",
     DBMS.FIREBIRD: " FROM RDB$DATABASE",
-    DBMS.MAXDB: " FROM VERSIONS",
+    DBMS.MAXDB: " FROM DUAL",
     DBMS.DB2: " FROM SYSIBM.SYSDUMMY1",
     DBMS.HSQLDB: " FROM INFORMATION_SCHEMA.SYSTEM_USERS",
     DBMS.INFORMIX: " FROM SYSMASTER:SYSDUAL",
     DBMS.DERBY: " FROM SYSIBM.SYSDUMMY1",
     DBMS.MIMERSQL: " FROM SYSTEM.ONEROW",
-    DBMS.FRONTBASE: " FROM INFORMATION_SCHEMA.IO_STATISTICS"
+    DBMS.FRONTBASE: " FROM INFORMATION_SCHEMA.IO_STATISTICS",
+    DBMS.HANA: " FROM DUMMY"
 }
 
 HEURISTIC_NULL_EVAL = {
     DBMS.ACCESS: "CVAR(NULL)",
     DBMS.MAXDB: "ALPHA(NULL)",
-    DBMS.MSSQL: "DIFFERENCE(NULL,NULL)",
-    DBMS.MYSQL: "QUARTER(NULL)",
+    DBMS.MSSQL: "PARSENAME(NULL,NULL)",
+    DBMS.SYBASE: "STR_REPLACE(NULL,'x','x')",  # ASE extension (MSSQL has REPLACE); doc-derived, not live-tested. Also SAP IQ / SQL Anywhere (not in DBMS)
+    DBMS.MYSQL: "IFNULL(QUARTER(NULL),NULL XOR NULL)",  # NOTE: previous form (i.e., QUARTER(NULL XOR NULL)) was bad as some optimization engines wrongly evaluate QUARTER(NULL XOR NULL) to 0
     DBMS.ORACLE: "INSTR2(NULL,NULL)",
     DBMS.PGSQL: "QUOTE_IDENT(NULL)",
-    DBMS.SQLITE: "UNLIKELY(NULL)",
+    DBMS.SQLITE: "JULIANDAY(NULL)",
     DBMS.H2: "STRINGTOUTF8(NULL)",
     DBMS.MONETDB: "CODE(NULL)",
-    DBMS.DERBY: "NULLIF(USER,SESSION_USER)",
+    DBMS.DERBY: "NULLIF(USER,SESSION_USER)",  # not Derby-specific; safe only because DB2 (shares this dummy) is tested first
+    DBMS.DB2: "MULTIPLY_ALT(NULL,NULL)",  # DB2-unique (Derby shares the dummy, not this function)
     DBMS.VERTICA: "BITSTRING_TO_BINARY(NULL)",
     DBMS.MCKOI: "TONUMBER(NULL)",
     DBMS.PRESTO: "FROM_HEX(NULL)",
     DBMS.ALTIBASE: "TDESENCRYPT(NULL,NULL)",
     DBMS.MIMERSQL: "ASCII_CHAR(256)",
-    DBMS.CRATEDB: "MD5(NULL~NULL)",  # Note: NULL~NULL also being evaluated on H2 and Ignite
+    DBMS.CRATEDB: "GEN_RANDOM_TEXT_UUID()~NULL",  # NOTE: old MD5(NULL~NULL) was too loose (also NULL on MonetDB/H2/Ignite -> they mis-identified as CrateDB); gen_random_text_uuid() is CrateDB-only, and ~NULL keeps it a NULL-eval
     DBMS.CUBRID: "(NULL SETEQ NULL)",
-    DBMS.CACHE: "%SQLUPPER NULL",
+    DBMS.CACHE: "%EXACT(NULL)",  # NOTE: '%SQLUPPER NULL' does not parse inside the heuristic's (SELECT ...) form, so Cache/IRIS fell through to a later, non-unique marker (e.g. Mckoi TONUMBER); the %-prefixed collation function %EXACT() is InterSystems-unique and works here
     DBMS.EXTREMEDB: "NULLIFZERO(hashcode(NULL))",
-    DBMS.RAIMA: "IF(ROWNUMBER()>0,CONVERT(NULL,TINYINT),NULL))",
+    DBMS.RAIMA: "IF(ROWNUMBER()>0,CONVERT(NULL,TINYINT),NULL)",
     DBMS.VIRTUOSO: "__MAX_NOTNULL(NULL)",
+    DBMS.CLICKHOUSE: "halfMD5(NULL)",
+    DBMS.SNOWFLAKE: "BOOLNOT(NULL)",
+    DBMS.SPANNER: "FARM_FINGERPRINT(NULL)",  # also BigQuery GoogleSQL (not in DBMS)
+    DBMS.HANA: "MAP(NULL,NULL,NULL,NULL,NULL)",
 }
 
 SQL_STATEMENTS = {
@@ -321,6 +375,7 @@ SQL_STATEMENTS = {
         "update ",
         "delete ",
         "merge ",
+        "copy ",
         "load ",
     ),
 
@@ -352,6 +407,7 @@ SQL_STATEMENTS = {
 POST_HINT_CONTENT_TYPES = {
     POST_HINT.JSON: "application/json",
     POST_HINT.JSON_LIKE: "application/json",
+    POST_HINT.GRPC_WEB: "application/grpc-web-text",
     POST_HINT.MULTIPART: "multipart/form-data",
     POST_HINT.SOAP: "application/soap+xml",
     POST_HINT.XML: "application/xml",
@@ -377,13 +433,24 @@ DEPRECATED_OPTIONS = {
 }
 
 DUMP_DATA_PREPROCESS = {
-    DBMS.ORACLE: {"XMLTYPE": "(%s).getStringVal()"},  # Reference: https://www.tibcommunity.com/docs/DOC-3643
-    DBMS.MSSQL: {"IMAGE": "CONVERT(VARBINARY(MAX),%s)"},
+    DBMS.ORACLE: {"XMLTYPE": "(%s).getStringVal()"},
+    DBMS.MSSQL: {
+        "IMAGE": "CONVERT(VARBINARY(MAX),%s)",
+        "GEOMETRY": "(%s).STAsText()",
+        "GEOGRAPHY": "(%s).STAsText()"
+    },
+    DBMS.PGSQL: {
+        "GEOMETRY": "ST_AsText(%s)",
+        "GEOGRAPHY": "ST_AsText(%s)"
+    },
+    DBMS.MYSQL: {
+        "GEOMETRY": "ST_AsText(%s)"
+    }
 }
 
 DEFAULT_DOC_ROOTS = {
     OS.WINDOWS: ("C:/xampp/htdocs/", "C:/wamp/www/", "C:/Inetpub/wwwroot/"),
-    OS.LINUX: ("/var/www/", "/var/www/html", "/var/www/htdocs", "/usr/local/apache2/htdocs", "/usr/local/www/data", "/var/apache2/htdocs", "/var/www/nginx-default", "/srv/www/htdocs", "/usr/local/var/www")  # Reference: https://wiki.apache.org/httpd/DistrosDefaultLayout
+    OS.LINUX: ("/var/www/", "/var/www/html", "/var/www/htdocs", "/usr/local/apache2/htdocs", "/usr/local/www/data", "/var/apache2/htdocs", "/var/www/nginx-default", "/srv/www/htdocs", "/usr/local/var/www", "/usr/share/nginx/html")
 }
 
 PART_RUN_CONTENT_TYPES = {
@@ -406,6 +473,8 @@ PART_RUN_CONTENT_TYPES = {
     "dumpTable": CONTENT_TYPE.DUMP_TABLE,
     "search": CONTENT_TYPE.SEARCH,
     "sqlQuery": CONTENT_TYPE.SQL_QUERY,
+    "getStatements": CONTENT_TYPE.STATEMENTS,
+    "getProcs": CONTENT_TYPE.PROCEDURES,
     "tableExists": CONTENT_TYPE.COMMON_TABLES,
     "columnExists": CONTENT_TYPE.COMMON_COLUMNS,
     "readFile": CONTENT_TYPE.FILE_READ,

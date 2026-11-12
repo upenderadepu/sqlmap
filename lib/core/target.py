@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -25,8 +25,11 @@ from lib.core.common import randomStr
 from lib.core.common import readInput
 from lib.core.common import removePostHintPrefix
 from lib.core.common import resetCookieJar
+from lib.core.common import safeStringFormat
+from lib.core.common import unArrayizeValue
 from lib.core.common import urldecode
 from lib.core.compat import xrange
+from lib.core.convert import decodeBase64
 from lib.core.convert import getUnicode
 from lib.core.data import conf
 from lib.core.data import kb
@@ -74,9 +77,11 @@ from lib.core.settings import URI_INJECTABLE_REGEX
 from lib.core.settings import USER_AGENT_ALIASES
 from lib.core.settings import XML_RECOGNITION_REGEX
 from lib.core.threads import getCurrentThreadData
+from lib.utils.grpcweb import CONTENT_TYPE as grpcWebContentType
+from lib.utils.grpcweb import decodeBody as grpcDecodeBody
 from lib.utils.hashdb import HashDB
 from thirdparty import six
-from thirdparty.odict import OrderedDict
+from collections import OrderedDict
 from thirdparty.six.moves import urllib as _urllib
 
 def _setRequestParams():
@@ -103,11 +108,21 @@ def _setRequestParams():
 
     # Perform checks on POST parameters
     if conf.method == HTTPMETHOD.POST and conf.data is None:
-        logger.warn("detected empty POST body")
+        logger.warning("detected empty POST body")
         conf.data = ""
 
     if conf.data is not None:
         conf.method = conf.method or HTTPMETHOD.POST
+
+        # probe (side-effect-free) whether this is a gRPC-Web body; if so, expose its string fields as a
+        # JSON view so the standard JSON injection path can process it. The skeleton is committed to
+        # kb.grpcWeb (and the JSON view kept) ONLY on user acceptance below; if declined, the original
+        # body is restored so it is sent verbatim (never the JSON surrogate)
+        kb.grpcWeb = None
+        _grpcOriginalData = conf.data
+        _grpcView, _grpcSkeleton = grpcDecodeBody(conf.data)
+        if _grpcView is not None:
+            conf.data = _grpcView
 
         def process(match, repl):
             retVal = match.group(0)
@@ -117,7 +132,10 @@ def _setRequestParams():
                 while True:
                     _ = re.search(r"\\g<([^>]+)>", retVal)
                     if _:
-                        retVal = retVal.replace(_.group(0), match.group(int(_.group(1)) if _.group(1).isdigit() else _.group(1)))
+                        try:
+                            retVal = retVal.replace(_.group(0), match.group(int(_.group(1)) if _.group(1).isdigit() else _.group(1)))
+                        except IndexError:
+                            break
                     else:
                         break
                 if kb.customInjectionMark in retVal:
@@ -139,18 +157,32 @@ def _setRequestParams():
                     kb.testOnlyCustom = True
 
         if re.search(JSON_RECOGNITION_REGEX, conf.data):
-            message = "JSON data found in %s body. " % conf.method
-            message += "Do you want to process it? [Y/n/q] "
+            if _grpcSkeleton:
+                message = "gRPC-Web text data found in %s body. Do you want to process its detected string fields? [Y/n/q] " % conf.method
+            else:
+                message = "JSON data found in %s body. Do you want to process it? [Y/n/q] " % conf.method
             choice = readInput(message, default='Y').upper()
 
             if choice == 'Q':
                 raise SqlmapUserQuitException
             elif choice == 'Y':
-                kb.postHint = POST_HINT.JSON
+                kb.postHint = POST_HINT.GRPC_WEB if _grpcSkeleton else POST_HINT.JSON
+                if _grpcSkeleton:
+                    kb.grpcWeb = _grpcSkeleton  # commit only on acceptance
+                    # force a grpc-web-text response (the only kind this cut decodes) by REPLACING any
+                    # existing Accept - a captured 'Accept: */*', or an explicit 'q=0' we cannot honor
+                    for _index, (_header, _value) in enumerate(conf.httpHeaders or []):
+                        if _header.lower() == HTTP_HEADER.ACCEPT.lower():
+                            conf.httpHeaders[_index] = (_header, grpcWebContentType)
+                            break
+                    else:
+                        conf.httpHeaders.append((HTTP_HEADER.ACCEPT, grpcWebContentType))
                 if not (kb.processUserMarks and kb.customInjectionMark in conf.data):
                     conf.data = getattr(conf.data, UNENCODED_ORIGINAL_VALUE, conf.data)
                     conf.data = conf.data.replace(kb.customInjectionMark, ASTERISK_MARKER)
-                    conf.data = re.sub(r'("(?P<name>[^"]+)"\s*:\s*".+?)"(?<!\\")', functools.partial(process, repl=r'\g<1>%s"' % kb.customInjectionMark), conf.data)
+                    # Note: proper JSON string matching (e.g. "x\\" ends with an escaped backslash, not with an escaped quote)
+                    conf.data = re.sub(r'("(?P<name>[^"]+)"\s*:\s*"(?:[^"\\]|\\.)*)"', functools.partial(process, repl=r'\g<1>%s"' % kb.customInjectionMark), conf.data)
+                    conf.data = re.sub(r'("(?P<name>[^"]+)"\s*:\s*")"', functools.partial(process, repl=r'\g<1>%s"' % kb.customInjectionMark), conf.data)
                     conf.data = re.sub(r'("(?P<name>[^"]+)"\s*:\s*)(-?\d[\d\.]*)\b', functools.partial(process, repl=r'\g<1>\g<3>%s' % kb.customInjectionMark), conf.data)
                     conf.data = re.sub(r'("(?P<name>[^"]+)"\s*:\s*)((true|false|null))\b', functools.partial(process, repl=r'\g<1>\g<3>%s' % kb.customInjectionMark), conf.data)
                     for match in re.finditer(r'(?P<name>[^"]+)"\s*:\s*\[([^\]]+)\]', conf.data):
@@ -207,6 +239,22 @@ def _setRequestParams():
                     conf.data = conf.data.replace(kb.customInjectionMark, ASTERISK_MARKER)
                     conf.data = re.sub(r"(<(?P<name>[^>]+)( [^<]*)?>)([^<]+)(</\2)", functools.partial(process, repl=r"\g<1>\g<4>%s\g<5>" % kb.customInjectionMark), conf.data)
 
+                    # Also expose XML attribute values (e.g. <item id="1">) as injection points, not just
+                    # element text (Reference: https://github.com/sqlmapproject/sqlmap/issues/5993). Done per
+                    # opening tag (skipping <?...?> declarations, <!...> and closing tags) so every attribute
+                    # is covered while the XML declaration/namespaces are left intact.
+                    def processAttributes(match):
+                        def _attr(m):
+                            name = m.group("name")
+                            if name == "xmlns" or name.startswith("xmlns:"):  # namespace declarations are not injection points
+                                return m.group(0)
+                            if conf.testParameter and name not in (removePostHintPrefix(_) for _ in conf.testParameter):
+                                return m.group(0)
+                            hintNames.append(("%s%s%s" % (m.group(1), m.group(3), m.group(4)), name))
+                            return "%s%s%s%s%s" % (m.group(1), m.group(3), m.group(4), kb.customInjectionMark, m.group(5))
+                        return re.sub(r'(\s(?P<name>[\w:.-]+)\s*=\s*)(["\'])([^"\'<>]*)(["\'])', _attr, match.group(0))
+                    conf.data = re.sub(r"(?s)<[^>?!/][^>]*>", processAttributes, conf.data)
+
         elif re.search(MULTIPART_RECOGNITION_REGEX, conf.data):
             message = "Multipart-like data found in %s body. " % conf.method
             message += "Do you want to process it? [Y/n/q] "
@@ -219,7 +267,13 @@ def _setRequestParams():
                 if not (kb.processUserMarks and kb.customInjectionMark in conf.data):
                     conf.data = getattr(conf.data, UNENCODED_ORIGINAL_VALUE, conf.data)
                     conf.data = conf.data.replace(kb.customInjectionMark, ASTERISK_MARKER)
-                    conf.data = re.sub(r"(?si)((Content-Disposition[^\n]+?name\s*=\s*[\"']?(?P<name>[^\"'\r\n]+)[\"']?).+?)((%s)+--)" % ("\r\n" if "\r\n" in conf.data else '\n'), functools.partial(process, repl=r"\g<1>%s\g<4>" % kb.customInjectionMark), conf.data)
+                    conf.data = re.sub(r"(?si)(Content-Disposition:[^\n]+\s+name=\"(?P<name>[^\"]+)\"(?:[^fb]|f(?!ilename=)|b(?!oundary=))*?)((%s)--)" % ("\r\n" if "\r\n" in conf.data else '\n'),
+                                       functools.partial(process, repl=r"\g<1>%s\g<3>" % kb.customInjectionMark), conf.data)
+
+        # a gRPC-Web body that was NOT accepted as GRPC_WEB (declined prompt) must be sent verbatim,
+        # not as the JSON surrogate that was temporarily swapped into conf.data for detection
+        if _grpcSkeleton is not None and kb.postHint != POST_HINT.GRPC_WEB:
+            conf.data = _grpcOriginalData
 
         if not kb.postHint:
             if kb.customInjectionMark in conf.data:  # later processed
@@ -244,7 +298,7 @@ def _setRequestParams():
         warnMsg += "parameters (e.g. 'http://www.site.com/article.php?id=1') "
         warnMsg += "and without providing any POST parameters "
         warnMsg += "through option '--data'"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         message = "do you want to try URI injections "
         message += "in the target URL itself? [Y/n/q] "
@@ -276,11 +330,15 @@ def _setRequestParams():
                     if kb.processUserMarks:
                         kb.testOnlyCustom = True
 
+                        if conf.testParameter:
+                            warnMsg = "option '-p' is ignored as only the custom injection marker(s) ('%s') will be tested" % kb.customInjectionMark
+                            logger.warning(warnMsg)
+
                         if "=%s" % kb.customInjectionMark in _:
                             warnMsg = "it seems that you've provided empty parameter value(s) "
                             warnMsg += "for testing. Please, always use only valid parameter values "
                             warnMsg += "so sqlmap could be able to run properly"
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
             if not kb.processUserMarks:
                 if place == PLACE.URI:
@@ -302,6 +360,9 @@ def _setRequestParams():
                         testableParameters = True
 
             else:
+                if place == PLACE.URI:
+                    value = conf.url = conf.url.replace('+', "%20")  # NOTE: https://github.com/sqlmapproject/sqlmap/issues/5123
+
                 conf.parameters[place] = value
                 conf.paramDict[place] = OrderedDict()
 
@@ -382,7 +443,8 @@ def _setRequestParams():
                     testableParameters = True
 
             else:
-                condition = intersect(conf.testParameter, [httpHeader], True)
+                # Note: in case of --cookie, its (Cookie) parameters are tested separately (i.e. not the whole header)
+                condition = intersect(conf.testParameter, [httpHeader], True) and not (conf.cookie and httpHeader.upper() == HTTP_HEADER.COOKIE.upper())
 
                 if condition:
                     conf.parameters[PLACE.CUSTOM_HEADER] = str(conf.httpHeaders)
@@ -401,7 +463,7 @@ def _setRequestParams():
         raise SqlmapGenericException(errMsg)
 
     if conf.csrfToken:
-        if not any(re.search(conf.csrfToken, ' '.join(_), re.I) for _ in (conf.paramDict.get(PLACE.GET, {}), conf.paramDict.get(PLACE.POST, {}), conf.paramDict.get(PLACE.COOKIE, {}))) and not re.search(r"\b%s\b" % conf.csrfToken, conf.data or "") and conf.csrfToken not in set(_[0].lower() for _ in conf.httpHeaders) and conf.csrfToken not in conf.paramDict.get(PLACE.COOKIE, {}) and not all(re.search(conf.csrfToken, _, re.I) for _ in conf.paramDict.get(PLACE.URI, {}).values()):
+        if not any(re.search(conf.csrfToken, ' '.join(_), re.I) for _ in (conf.paramDict.get(PLACE.GET, {}), conf.paramDict.get(PLACE.POST, {}), conf.paramDict.get(PLACE.COOKIE, {}))) and not re.search(r"\b%s\b" % conf.csrfToken, "%s %s" % (conf.data or "", conf.parameters.get(PLACE.GET) or "")) and not any(re.search(r"\A%s\Z" % conf.csrfToken, _[0], re.I) for _ in conf.httpHeaders) and conf.csrfToken not in conf.paramDict.get(PLACE.COOKIE, {}) and not any(re.search(conf.csrfToken, _, re.I) for _ in conf.paramDict.get(PLACE.URI, {}).values()):
             errMsg = "anti-CSRF token parameter '%s' not " % conf.csrfToken._original
             errMsg += "found in provided GET, POST, Cookie or header values"
             raise SqlmapGenericException(errMsg)
@@ -430,8 +492,12 @@ def _setHashDB():
     if not conf.hashDBFile:
         conf.hashDBFile = conf.sessionFile or os.path.join(conf.outputPath, SESSION_SQLITE_FILE)
 
-    if os.path.exists(conf.hashDBFile):
-        if conf.flushSession:
+    if conf.sessionFile and not os.path.isdir(os.path.dirname(os.path.abspath(conf.hashDBFile))):
+        errMsg = "directory of the provided session file '%s' does not exist" % conf.sessionFile
+        raise SqlmapFilePathException(errMsg)
+
+    if conf.flushSession:
+        if os.path.exists(conf.hashDBFile):
             if conf.hashDB:
                 conf.hashDB.closeAll()
 
@@ -441,6 +507,14 @@ def _setHashDB():
             except OSError as ex:
                 errMsg = "unable to flush the session file ('%s')" % getSafeExString(ex)
                 raise SqlmapFilePathException(errMsg)
+
+        for suffix in ("-shm", "-wal"):
+            leftover = conf.hashDBFile + suffix
+            if os.path.exists(leftover):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
 
     conf.hashDB = HashDB(conf.hashDBFile)
 
@@ -454,7 +528,9 @@ def _resumeHashDBValues():
     kb.brute.columns = hashDBRetrieve(HASHDB_KEYS.KB_BRUTE_COLUMNS, True) or kb.brute.columns
     kb.chars = hashDBRetrieve(HASHDB_KEYS.KB_CHARS, True) or kb.chars
     kb.dynamicMarkings = hashDBRetrieve(HASHDB_KEYS.KB_DYNAMIC_MARKINGS, True) or kb.dynamicMarkings
-    kb.xpCmdshellAvailable = hashDBRetrieve(HASHDB_KEYS.KB_XP_CMDSHELL_AVAILABLE) or kb.xpCmdshellAvailable
+    # Note: the value is stored as text ("True"/"False"); coerce back to bool, otherwise a resumed
+    # "False" is a truthy string and would wrongly mark xp_cmdshell as available
+    kb.xpCmdshellAvailable = (hashDBRetrieve(HASHDB_KEYS.KB_XP_CMDSHELL_AVAILABLE) == str(True)) or kb.xpCmdshellAvailable
 
     kb.errorChunkLength = hashDBRetrieve(HASHDB_KEYS.KB_ERROR_CHUNK_LENGTH)
     if isNumPosStrValue(kb.errorChunkLength):
@@ -495,7 +571,11 @@ def _resumeDBMS():
     dbms = value.lower()
     dbmsVersion = [UNKNOWN_DBMS_VERSION]
     _ = "(%s)" % ('|'.join(SUPPORTED_DBMS))
-    _ = re.search(r"\A%s (.*)" % _, dbms, re.I)
+    try:
+        # Dirty patch for a Python 3.13/3.14 re module regression (e.g. https://github.com/sqlmapproject/sqlmap/issues/6128, https://github.com/sqlmapproject/sqlmap/issues/6137)
+        _ = re.search(r"\A%s (.*)" % _, dbms, re.I)
+    except TypeError:
+        _ = None
 
     if _:
         dbms = _.group(1).lower()
@@ -517,6 +597,7 @@ def _resumeDBMS():
 
             if not readInput(message, default='N', boolean=True):
                 conf.dbms = None
+                kb.dbmsFilter = []
                 Backend.setDbms(dbms)
                 Backend.setVersionList(dbmsVersion)
     else:
@@ -579,7 +660,7 @@ def _setResultsFile():
                 os.close(handle)
                 conf.resultsFP = openFile(conf.resultsFile, "w+", UNICODE_ENCODING, buffering=0)
                 warnMsg += "Using temporary file '%s' instead" % conf.resultsFile
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
             except IOError as _:
                 errMsg = "unable to write to the temporary directory ('%s'). " % _
                 errMsg += "Please make sure that your disk is not full and "
@@ -597,10 +678,15 @@ def _createFilesDir():
     Create the file directory.
     """
 
-    if not any((conf.fileRead, conf.commonFiles)):
+    if not any((conf.fileRead, conf.commonFiles, conf.xxe)):
         return
 
-    conf.filePath = paths.SQLMAP_FILES_PATH % conf.hostname
+    # Note: normalize the hostname consistently with conf.outputPath / conf.dumpPath (see _createDumpDir).
+    # safeStringFormat() (not raw '%') because SQLMAP_FILES_PATH embeds SQLMAP_OUTPUT_PATH, which comes
+    # straight from --output-dir - a literal '%' anywhere in that user-supplied path (e.g. an unexpanded
+    # '$(date +%Y%m%d)' on a shell that doesn't support command substitution) would otherwise make the
+    # '%' operator try to parse it as a format directive and crash
+    conf.filePath = safeStringFormat(paths.SQLMAP_FILES_PATH, normalizeUnicode(getUnicode(conf.hostname)))
 
     if not os.path.isdir(conf.filePath):
         try:
@@ -609,8 +695,8 @@ def _createFilesDir():
             tempDir = tempfile.mkdtemp(prefix="sqlmapfiles")
             warnMsg = "unable to create files directory "
             warnMsg += "'%s' (%s). " % (conf.filePath, getUnicode(ex))
-            warnMsg += "Using temporary directory '%s' instead" % tempDir
-            logger.warn(warnMsg)
+            warnMsg += "Using temporary directory '%s' instead" % getUnicode(tempDir)
+            logger.warning(warnMsg)
 
             conf.filePath = tempDir
 
@@ -622,17 +708,19 @@ def _createDumpDir():
     if not conf.dumpTable and not conf.dumpAll and not conf.search:
         return
 
-    conf.dumpPath = paths.SQLMAP_DUMP_PATH % conf.hostname
+    # Note: normalize the hostname the same way _createTargetDirs() builds conf.outputPath, so a
+    # non-ASCII (IDN) target keeps its dump under the same per-host tree as the session/log/target.txt
+    conf.dumpPath = safeStringFormat(paths.SQLMAP_DUMP_PATH, normalizeUnicode(getUnicode(conf.hostname)))
 
     if not os.path.isdir(conf.dumpPath):
         try:
             os.makedirs(conf.dumpPath)
-        except OSError as ex:
+        except Exception as ex:
             tempDir = tempfile.mkdtemp(prefix="sqlmapdump")
             warnMsg = "unable to create dump directory "
             warnMsg += "'%s' (%s). " % (conf.dumpPath, getUnicode(ex))
-            warnMsg += "Using temporary directory '%s' instead" % tempDir
-            logger.warn(warnMsg)
+            warnMsg += "Using temporary directory '%s' instead" % getUnicode(tempDir)
+            logger.warning(warnMsg)
 
             conf.dumpPath = tempDir
 
@@ -655,7 +743,7 @@ def _createTargetDirs():
         warnMsg = "unable to create output directory "
         warnMsg += "'%s' (%s). " % (conf.outputPath, getUnicode(ex))
         warnMsg += "Using temporary directory '%s' instead" % getUnicode(tempDir)
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         conf.outputPath = tempDir
 
@@ -678,7 +766,7 @@ def _createTargetDirs():
         raise SqlmapMissingPrivileges(errMsg)
     except UnicodeError as ex:
         warnMsg = "something went wrong while saving target data ('%s')" % getSafeExString(ex)
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     _createDumpDir()
     _createFilesDir()
@@ -739,6 +827,15 @@ def initTargetEnv():
             conf.data = _(urldecode(conf.data))
             setattr(conf.data, UNENCODED_ORIGINAL_VALUE, original)
             kb.postSpaceToPlus = '+' in original
+
+    if conf.data and unArrayizeValue(conf.base64Parameter) == HTTPMETHOD.POST:
+        if '=' not in conf.data.strip('='):
+            try:
+                original = conf.data
+                conf.data = _(decodeBase64(conf.data, binary=False))
+                setattr(conf.data, UNENCODED_ORIGINAL_VALUE, original)
+            except:
+                pass
 
     match = re.search(INJECT_HERE_REGEX, "%s %s %s" % (conf.url, conf.data, conf.httpHeaders))
     kb.customInjectionMark = match.group(0) if match else CUSTOM_INJECTION_MARK_CHAR

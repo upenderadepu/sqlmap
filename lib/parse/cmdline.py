@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -130,19 +130,28 @@ def cmdLineParser(argv=None):
             help="Connection string for direct database connection")
 
         target.add_argument("-l", dest="logFile",
-            help="Parse target(s) from Burp or WebScarab proxy log file")
+            help="Parse target(s) from Burp, WebScarab or HAR log file")
 
         target.add_argument("-m", dest="bulkFile",
-            help="Scan multiple targets given in a textual file ")
+            help="Scan multiple targets given in a textual file")
 
         target.add_argument("-r", dest="requestFile",
             help="Load HTTP request from a file")
 
-        target.add_argument("-g", dest="googleDork",
-            help="Process Google dork results as target URLs")
+        target.add_argument("-g", "--dork", dest="googleDork", metavar="DORK",
+            help="Process search engine dork results as target URLs")
 
         target.add_argument("-c", dest="configFile",
             help="Load options from a configuration INI file")
+
+        target.add_argument("--openapi", dest="openApiFile",
+            help="Derive targets from OpenAPI/Swagger (file/URL)")
+
+        target.add_argument("--openapi-base", dest="openApiBase",
+            help="Base URL for a host-less OpenAPI/Swagger spec")
+
+        target.add_argument("--openapi-tags", dest="openApiTags",
+            help="Only derive targets from operations with these tag(s)")
 
         # Request options
         request = parser.add_argument_group("Request", "These options can be used to specify how to connect to the target URL")
@@ -153,7 +162,7 @@ def cmdLineParser(argv=None):
         request.add_argument("-H", "--header", dest="header",
             help="Extra header (e.g. \"X-Forwarded-For: 127.0.0.1\")")
 
-        request.add_argument("--method", dest="method",
+        request.add_argument("-X", "--method", dest="method",
             help="Force usage of given HTTP method (e.g. PUT)")
 
         request.add_argument("--data", dest="data",
@@ -176,6 +185,12 @@ def cmdLineParser(argv=None):
 
         request.add_argument("--drop-set-cookie", dest="dropSetCookie", action="store_true",
             help="Ignore Set-Cookie header from response")
+
+        request.add_argument("--http1.0", dest="http10", action="store_true",
+            help="Use HTTP version 1.0 (old)")
+
+        request.add_argument("--http2", dest="http2", action="store_true",
+            help="Use HTTP version 2 (experimental)")
 
         request.add_argument("--mobile", dest="mobile", action="store_true",
             help="Imitate smartphone through HTTP User-Agent header")
@@ -201,8 +216,11 @@ def cmdLineParser(argv=None):
         request.add_argument("--auth-file", dest="authFile",
             help="HTTP authentication PEM cert/private key file")
 
+        request.add_argument("--abort-code", dest="abortCode",
+            help="Abort on (problematic) HTTP error code(s) (e.g. 401)")
+
         request.add_argument("--ignore-code", dest="ignoreCode",
-            help="Ignore (problematic) HTTP error code (e.g. 401)")
+            help="Ignore (problematic) HTTP error code(s) (e.g. 401)")
 
         request.add_argument("--ignore-proxy", dest="ignoreProxy", action="store_true",
             help="Ignore system default proxy settings")
@@ -246,6 +264,9 @@ def cmdLineParser(argv=None):
         request.add_argument("--retries", dest="retries", type=int,
             help="Retries when the connection timeouts (default %d)" % defaults.retries)
 
+        request.add_argument("--retry-on", dest="retryOn",
+            help="Retry request on regexp matching content (e.g. \"drop\")")
+
         request.add_argument("--randomize", dest="rParam",
             help="Randomly change value for given parameter(s)")
 
@@ -264,6 +285,9 @@ def cmdLineParser(argv=None):
         request.add_argument("--skip-urlencode", dest="skipUrlEncode", action="store_true",
             help="Skip URL encoding of payload data")
 
+        request.add_argument("--skip-xmlencode", dest="skipXmlEncode", action="store_true",
+            help="Skip safe encoding of payload data for SOAP/XML")
+
         request.add_argument("--csrf-token", dest="csrfToken",
             help="Parameter used to hold anti-CSRF token")
 
@@ -272,6 +296,9 @@ def cmdLineParser(argv=None):
 
         request.add_argument("--csrf-method", dest="csrfMethod",
             help="HTTP method to use during anti-CSRF token page visit")
+
+        request.add_argument("--csrf-data", dest="csrfData",
+            help="POST data to send during anti-CSRF token page visit")
 
         request.add_argument("--csrf-retries", dest="csrfRetries", type=int,
             help="Retries for anti-CSRF token retrieval (default %d)" % defaults.csrfRetries)
@@ -294,11 +321,9 @@ def cmdLineParser(argv=None):
         optimization.add_argument("-o", dest="optimize", action="store_true",
             help="Turn on all optimization switches")
 
-        optimization.add_argument("--predict-output", dest="predictOutput", action="store_true",
-            help="Predict common queries output")
-
-        optimization.add_argument("--keep-alive", dest="keepAlive", action="store_true",
-            help="Use persistent HTTP(s) connections")
+        # Note: persistent (Keep-Alive) connections are used by default; this opts out
+        optimization.add_argument("--no-keep-alive", dest="noKeepAlive", action="store_true",
+            help="Disable persistent HTTP(s) connections (Keep-Alive)")
 
         optimization.add_argument("--null-connection", dest="nullConnection", action="store_true",
             help="Retrieve page length without actual HTTP response body")
@@ -316,7 +341,7 @@ def cmdLineParser(argv=None):
             help="Skip testing for given parameter(s)")
 
         injection.add_argument("--skip-static", dest="skipStatic", action="store_true",
-            help="Skip testing parameters that not appear to be dynamic")
+            help="Skip testing parameters that do not appear to be dynamic")
 
         injection.add_argument("--param-exclude", dest="paramExclude",
             help="Regexp to exclude parameters from testing (e.g. \"ses\")")
@@ -329,6 +354,9 @@ def cmdLineParser(argv=None):
 
         injection.add_argument("--dbms-cred", dest="dbmsCred",
             help="DBMS authentication credentials (user:password)")
+
+        injection.add_argument("--esperanto", dest="esperanto", action="store_true",
+            help="Use the DBMS-agnostic enumeration engine")
 
         injection.add_argument("--os", dest="os",
             help="Force back-end DBMS operating system to provided value")
@@ -357,6 +385,9 @@ def cmdLineParser(argv=None):
         injection.add_argument("--tamper", dest="tamper",
             help="Use given script(s) for tampering injection data")
 
+        injection.add_argument("--proof", dest="proof", action="store_true",
+            help="Prove exploitation of the detected injection point(s)")
+
         # Detection options
         detection = parser.add_argument_group("Detection", "These options can be used to customize the detection phase")
 
@@ -378,6 +409,9 @@ def cmdLineParser(argv=None):
         detection.add_argument("--code", dest="code", type=int,
             help="HTTP code to match when query is evaluated to True")
 
+        detection.add_argument("--lengths", dest="lengths", action="store_true",
+            help="Compare pages based only on their content length")
+
         detection.add_argument("--smart", dest="smart", action="store_true",
             help="Perform thorough tests only if positive heuristic(s)")
 
@@ -396,6 +430,15 @@ def cmdLineParser(argv=None):
         techniques.add_argument("--time-sec", dest="timeSec", type=int,
             help="Seconds to delay the DBMS response (default %d)" % defaults.timeSec)
 
+        techniques.add_argument("--disable-stats", dest="disableStats", action="store_true",
+            help="Disable the statistical model for detecting the delay")
+
+        techniques.add_argument("--timeless", dest="timeless", action="store_true",
+            help="Use HTTP/2 timeless timing (faster, no delay)")
+
+        techniques.add_argument("--multi-bit", dest="multiBit", action="store_true",
+            help="Use rendered rows to read several bits per request")
+
         techniques.add_argument("--union-cols", dest="uCols",
             help="Range of columns to test for UNION query SQL injection")
 
@@ -405,8 +448,11 @@ def cmdLineParser(argv=None):
         techniques.add_argument("--union-from", dest="uFrom",
             help="Table to use in FROM part of UNION query SQL injection")
 
+        techniques.add_argument("--union-values", dest="uValues",
+            help="Column values to use for UNION query SQL injection")
+
         techniques.add_argument("--dns-domain", dest="dnsDomain",
-            help="Domain name used for DNS exfiltration attack")
+            help="Domain name used for DNS exfiltration attack (or 'interactsh' for zero-setup OOB)")
 
         techniques.add_argument("--second-url", dest="secondUrl",
             help="Resulting page URL searched for second-order response")
@@ -415,7 +461,7 @@ def cmdLineParser(argv=None):
             help="Load second-order HTTP request from file")
 
         # Fingerprint options
-        fingerprint = parser.add_argument_group("Fingerprint")
+        fingerprint = parser.add_argument_group("Fingerprint", "These options can be used to perform a back-end database management system version fingerprint")
 
         fingerprint.add_argument("-f", "--fingerprint", dest="extensiveFp", action="store_true",
             help="Perform an extensive DBMS version fingerprint")
@@ -438,6 +484,9 @@ def cmdLineParser(argv=None):
         enumeration.add_argument("--hostname", dest="getHostname", action="store_true",
             help="Retrieve DBMS server hostname")
 
+        enumeration.add_argument("--audit", dest="getAudit", action="store_true",
+            help="Audit DBMS security configuration and capabilities")
+
         enumeration.add_argument("--is-dba", dest="isDba", action="store_true",
             help="Detect if the DBMS current user is DBA")
 
@@ -452,6 +501,9 @@ def cmdLineParser(argv=None):
 
         enumeration.add_argument("--roles", dest="getRoles", action="store_true",
             help="Enumerate DBMS users roles")
+
+        enumeration.add_argument("--links", dest="getLinks", action="store_true",
+            help="Enumerate DBMS links")
 
         enumeration.add_argument("--dbs", dest="getDbs", action="store_true",
             help="Enumerate DBMS databases")
@@ -472,7 +524,7 @@ def cmdLineParser(argv=None):
             help="Dump DBMS database table entries")
 
         enumeration.add_argument("--dump-all", dest="dumpAll", action="store_true",
-            help="Dump all DBMS databases tables entries")
+            help="Dump entries of all DBMS database tables")
 
         enumeration.add_argument("--search", dest="search", action="store_true",
             help="Search column(s), table(s) and/or database name(s)")
@@ -483,6 +535,9 @@ def cmdLineParser(argv=None):
         enumeration.add_argument("--statements", dest="getStatements", action="store_true",
             help="Retrieve SQL statements being run on DBMS")
 
+        enumeration.add_argument("--procs", dest="getProcs", action="store_true",
+            help="Retrieve stored procedures/functions and their source")
+
         enumeration.add_argument("-D", dest="db",
             help="DBMS database to enumerate")
 
@@ -492,7 +547,7 @@ def cmdLineParser(argv=None):
         enumeration.add_argument("-C", dest="col",
             help="DBMS database table column(s) to enumerate")
 
-        enumeration.add_argument("-X", dest="exclude",
+        enumeration.add_argument("--exclude", dest="exclude",
             help="DBMS database identifier(s) to not enumerate")
 
         enumeration.add_argument("-U", dest="user",
@@ -574,11 +629,10 @@ def cmdLineParser(argv=None):
             help="Prompt for an OOB shell, Meterpreter or VNC")
 
         takeover.add_argument("--os-smbrelay", dest="osSmb", action="store_true",
-            help="One click prompt for an OOB shell, Meterpreter or VNC")
+            help="One-click prompt for an OOB shell, Meterpreter or VNC")
 
         takeover.add_argument("--os-bof", dest="osBof", action="store_true",
-            help="Stored procedure buffer overflow "
-                                 "exploitation")
+            help="Stored procedure buffer overflow exploitation")
 
         takeover.add_argument("--priv-esc", dest="privEsc", action="store_true",
             help="Database process user privilege escalation")
@@ -622,6 +676,9 @@ def cmdLineParser(argv=None):
         general.add_argument("-t", dest="trafficFile",
             help="Log all HTTP traffic into a textual file")
 
+        general.add_argument("--abort-on-empty", dest="abortOnEmpty", action="store_true",
+            help="Abort data retrieval on empty results")
+
         general.add_argument("--answers", dest="answers",
             help="Set predefined answers (e.g. \"quit=N,follow=N\")")
 
@@ -655,8 +712,11 @@ def cmdLineParser(argv=None):
         general.add_argument("--charset", dest="charset",
             help="Blind SQL injection charset (e.g. \"0123456789abcdef\")")
 
+        general.add_argument("--dump-file", dest="dumpFile",
+            help="Store dumped data to a custom file")
+
         general.add_argument("--dump-format", dest="dumpFormat",
-            help="Format of dumped data (CSV (default), HTML or SQLITE)")
+            help="Dump data format (CSV (default), HTML, SQLITE, JSONL)")
 
         general.add_argument("--encoding", dest="encoding",
             help="Character encoding used for data retrieval (e.g. GBK)")
@@ -670,11 +730,14 @@ def cmdLineParser(argv=None):
         general.add_argument("--forms", dest="forms", action="store_true",
             help="Parse and test forms on target URL")
 
+        general.add_argument("--mine-params", dest="mineParams", action="store_true",
+            help="Mine for hidden (unlinked) GET parameters to test")
+
         general.add_argument("--fresh-queries", dest="freshQueries", action="store_true",
             help="Ignore query results stored in session file")
 
-        general.add_argument("--gpage", dest="googlePage", type=int,
-            help="Use Google dork results from specified page number")
+        general.add_argument("--gpage", dest="googlePage", type=int, metavar="PAGE",
+            help="Use dork results from specified page number")
 
         general.add_argument("--har", dest="harFile",
             help="Log all HTTP traffic into a HAR file")
@@ -688,6 +751,9 @@ def cmdLineParser(argv=None):
         general.add_argument("--parse-errors", dest="parseErrors", action="store_true",
             help="Parse and display DBMS error messages from responses")
 
+        general.add_argument("--auth-refresh", dest="authRefresh",
+            help="Run script to refresh auth on HTTP 401")
+
         general.add_argument("--preprocess", dest="preprocess",
             help="Use given script(s) for preprocessing (request)")
 
@@ -696,6 +762,9 @@ def cmdLineParser(argv=None):
 
         general.add_argument("--repair", dest="repair", action="store_true",
             help="Redump entries having unknown character marker (%s)" % INFERENCE_UNKNOWN_CHAR)
+
+        general.add_argument("--report-json", dest="reportJson",
+            help="Store run results to a JSON file")
 
         general.add_argument("--save", dest="saveConfig",
             help="Save options to a configuration INI file")
@@ -718,8 +787,56 @@ def cmdLineParser(argv=None):
         general.add_argument("--test-skip", dest="testSkip",
             help="Skip tests by payloads and/or titles (e.g. BENCHMARK)")
 
+        general.add_argument("--time-limit", dest="timeLimit", type=float,
+            help="Run with a time limit in seconds (e.g. 3600)")
+
+        general.add_argument("--unsafe-naming", dest="unsafeNaming", action="store_true",
+            help="Disable escaping of DBMS identifiers (e.g. \"user\")")
+
         general.add_argument("--web-root", dest="webRoot",
             help="Web server document root directory (e.g. \"/var/www\")")
+
+        # Non-SQL injection options
+        nonsql = parser.add_argument_group("Non-SQL injection", "These options can be used to test for non-SQL injection types")
+
+        nonsql.add_argument("--graphql", dest="graphql", action="store_true",
+            help="Test for GraphQL injection")
+
+        nonsql.add_argument("--ldap", dest="ldap", action="store_true",
+            help="Test for LDAP injection")
+
+        nonsql.add_argument("--nosql", dest="nosql", action="store_true",
+            help="Test for NoSQL injection")
+
+        nonsql.add_argument("--xpath", dest="xpath", action="store_true",
+            help="Test for XPath injection")
+
+        nonsql.add_argument("--ssti", dest="ssti", action="store_true",
+            help="Test for server-side template injection")
+
+        nonsql.add_argument("--xslt", dest="xslt", action="store_true",
+            help="Test for XSLT injection")
+
+        nonsql.add_argument("--xxe", dest="xxe", action="store_true",
+            help="Test for XML External Entity (XXE) injection")
+
+        nonsql.add_argument("--hql", dest="hql", action="store_true",
+            help="Test for HQL/JPQL (Hibernate ORM) injection")
+
+        nonsql.add_argument("--sparql", dest="sparql", action="store_true",
+            help="Test for SPARQL injection")
+
+        nonsql.add_argument("--odata", dest="odata", action="store_true",
+            help="Test for OData $filter injection")
+
+        nonsql.add_argument("--jwt", dest="jwt", action="store_true",
+            help="Audit JSON Web Tokens (JWT) for weaknesses")
+
+        nonsql.add_argument("--oob-server", dest="oobServer",
+            help="Out-of-band server for blind '--xxe'")
+
+        nonsql.add_argument("--oob-token", dest="oobToken",
+            help="Authentication token for a self-hosted '--oob-server'")
 
         # Miscellaneous options
         miscellaneous = parser.add_argument_group("Miscellaneous", "These options do not fit into any other category")
@@ -739,8 +856,20 @@ def cmdLineParser(argv=None):
         miscellaneous.add_argument("--disable-coloring", dest="disableColoring", action="store_true",
             help="Disable console output coloring")
 
+        miscellaneous.add_argument("--disable-hashing", dest="disableHashing", action="store_true",
+            help="Disable hash analysis on table dumps")
+
+        miscellaneous.add_argument("--gui", dest="gui", action="store_true",
+            help="Graphical user interface (Tkinter)")
+
         miscellaneous.add_argument("--list-tampers", dest="listTampers", action="store_true",
             help="Display list of available tamper scripts")
+
+        miscellaneous.add_argument("--no-logging", dest="noLogging", action="store_true",
+            help="Disable logging to a file")
+
+        miscellaneous.add_argument("--no-truncate", dest="noTruncate", action="store_true",
+            help="Disable console output truncation (e.g. long entr...)")
 
         miscellaneous.add_argument("--offline", dest="offline", action="store_true",
             help="Work in offline mode (only use session data)")
@@ -756,6 +885,9 @@ def cmdLineParser(argv=None):
 
         miscellaneous.add_argument("--tmp-dir", dest="tmpDir",
             help="Local directory for storing temporary files")
+
+        miscellaneous.add_argument("--tui", dest="tui", action="store_true",
+            help="Textual user interface (ncurses)")
 
         miscellaneous.add_argument("--unstable", dest="unstable", action="store_true",
             help="Adjust options for unstable connections")
@@ -776,7 +908,7 @@ def cmdLineParser(argv=None):
         parser.add_argument("--yuge", dest="yuge", action="store_true",
             help=SUPPRESS)
 
-        parser.add_argument("--murphy-rate", dest="murphyRate", type=int,
+        parser.add_argument("--jitter", dest="jitter", type=int,
             help=SUPPRESS)
 
         parser.add_argument("--debug", dest="debug", action="store_true",
@@ -791,8 +923,8 @@ def cmdLineParser(argv=None):
         parser.add_argument("--disable-precon", dest="disablePrecon", action="store_true",
             help=SUPPRESS)
 
-        parser.add_argument("--disable-stats", dest="disableStats", action="store_true",
-            help=SUPPRESS)
+        parser.add_argument("--no-huffman", dest="noHuffman", action="store_true",
+            help=SUPPRESS)  # "Disable adaptive (Huffman) set-membership retrieval used by default to speed up blind table dumps"
 
         parser.add_argument("--profile", dest="profile", action="store_true",
             help=SUPPRESS)
@@ -812,16 +944,38 @@ def cmdLineParser(argv=None):
         parser.add_argument("--force-pivoting", dest="forcePivoting", action="store_true",
             help=SUPPRESS)
 
+        # Experimental: dump table rows via keyset (seek) pagination on a detected indexed
+        # primary key instead of ORDER BY ... LIMIT/OFFSET (much cheaper on huge tables).
+        # --keyset forces it for any table size; --no-keyset disables it (incl. the automatic
+        # use on large tables), falling back to the plain LIMIT/OFFSET dump.
+        parser.add_argument("--keyset", dest="keyset", action="store_true",
+            help=SUPPRESS)
+
+        parser.add_argument("--no-keyset", dest="noKeyset", action="store_true",
+            help=SUPPRESS)
+
+        parser.add_argument("--ignore-stdin", dest="ignoreStdin", action="store_true",
+            help=SUPPRESS)
+
         parser.add_argument("--non-interactive", dest="nonInteractive", action="store_true",
             help=SUPPRESS)
 
-        parser.add_argument("--gui", dest="gui", action="store_true",
-            help=SUPPRESS)
-
-        parser.add_argument("--smoke-test", dest="smokeTest", action="store_true",
+        parser.add_argument("--smoke-test", "--doc-test", dest="smokeTest", action="store_true",
             help=SUPPRESS)
 
         parser.add_argument("--vuln-test", dest="vulnTest", action="store_true",
+            help=SUPPRESS)
+
+        parser.add_argument("--fp-test", dest="fpTest", action="store_true",
+            help=SUPPRESS)
+
+        parser.add_argument("--payload-lint", dest="payloadLint", action="store_true",
+            help=SUPPRESS)
+
+        parser.add_argument("--api-test", dest="apiTest", action="store_true",
+            help=SUPPRESS)
+
+        parser.add_argument("--disable-json", dest="disableJson", action="store_true",
             help=SUPPRESS)
 
         # API options
@@ -888,9 +1042,16 @@ def cmdLineParser(argv=None):
         checkOldOptions(argv)
 
         if "--gui" in argv:
-            from lib.core.gui import runGui
+            from lib.utils.gui import runGui
 
             runGui(parser)
+
+            raise SqlmapSilentQuitException
+
+        elif "--tui" in argv:
+            from lib.utils.tui import runTui
+
+            runTui(parser)
 
             raise SqlmapSilentQuitException
 
@@ -949,7 +1110,7 @@ def cmdLineParser(argv=None):
             argv[i] = re.sub(u"\\A(\u2010|\u2013|\u2212|\u2014|\u4e00|\u1680|\uFE63|\uFF0D)+", lambda match: '-' * len(match.group(0)), argv[i])
 
             # Reference: https://unicode-table.com/en/sets/quotation-marks/
-            argv[i] = argv[i].strip(u"\u00AB\u2039\u00BB\u203A\u201E\u201C\u201F\u201D\u2019\u0022\u275D\u275E\u276E\u276F\u2E42\u301D\u301E\u301F\uFF02\u201A\u2018\u201B\u275B\u275C")
+            argv[i] = argv[i].strip(u"\u00AB\u2039\u00BB\u203A\u201E\u201C\u201F\u201D\u2019\u275D\u275E\u276E\u276F\u2E42\u301D\u301E\u301F\uFF02\u201A\u2018\u201B\u275B\u275C")
 
             if argv[i] == "-hh":
                 argv[i] = "-h"
@@ -971,13 +1132,19 @@ def cmdLineParser(argv=None):
                 argv[i] = ""
             elif argv[i] in DEPRECATED_OPTIONS:
                 argv[i] = ""
+            elif argv[i] in ("-s", "--silent"):
+                if i + 1 < len(argv) and argv[i + 1].startswith('-') or i + 1 == len(argv):
+                    argv[i] = ""
+                    conf.verbose = 0
             elif argv[i].startswith("--data-raw"):
                 argv[i] = argv[i].replace("--data-raw", "--data", 1)
             elif argv[i].startswith("--auth-creds"):
                 argv[i] = argv[i].replace("--auth-creds", "--auth-cred", 1)
             elif argv[i].startswith("--drop-cookie"):
                 argv[i] = argv[i].replace("--drop-cookie", "--drop-set-cookie", 1)
-            elif any(argv[i].startswith(_) for _ in ("--tamper", "--ignore-code", "--skip")):
+            elif re.search(r"\A--tamper[^=\s]", argv[i]):
+                argv[i] = ""
+            elif re.search(r"\A(--(tamper|ignore-code|skip))(?!-)", argv[i]):
                 key = re.search(r"\-?\-(\w+)\b", argv[i]).group(1)
                 index = auxIndexes.get(key, None)
                 if index is None:
@@ -1025,7 +1192,7 @@ def cmdLineParser(argv=None):
                 dataToStdout("[!] detected usage of long-option without a starting hyphen ('%s')\n" % argv[i])
                 raise SystemExit
 
-        for verbosity in (_ for _ in argv if re.search(r"\A\-v+\Z", _)):
+        for verbosity in [_ for _ in argv if re.search(r"\A\-v+\Z", _)]:  # Note: list (not a generator) - the loop mutates argv (del), which would desync a live generator and leave a stray '-v' for argparse to choke on
             try:
                 if argv.index(verbosity) == len(argv) - 1 or not argv[argv.index(verbosity) + 1].isdigit():
                     conf.verbose = verbosity.count('v')
@@ -1057,12 +1224,15 @@ def cmdLineParser(argv=None):
         if args.dummy:
             args.url = args.url or DUMMY_URL
 
-        if hasattr(sys.stdin, "fileno") and not any((os.isatty(sys.stdin.fileno()), args.api, "GITHUB_ACTIONS" in os.environ)):
+        # Note: an explicit target source rules out reading targets from the standard input. Without
+        # this, any non-interactive run (CI, cron, subprocess) would turn '-d/-u/-m/-l/-r/-g' into a
+        # 'multiple targets' run reading from a pipe, which also resets per-target options in between
+        if hasattr(sys.stdin, "fileno") and not any((os.isatty(sys.stdin.fileno()), args.api, args.ignoreStdin, "GITHUB_ACTIONS" in os.environ, args.direct, args.url, args.logFile, args.bulkFile, args.requestFile, args.googleDork, args.configFile, args.openApiFile)):
             args.stdinPipe = iter(sys.stdin.readline, None)
         else:
             args.stdinPipe = None
 
-        if not any((args.direct, args.url, args.logFile, args.bulkFile, args.googleDork, args.configFile, args.requestFile, args.updateAll, args.smokeTest, args.vulnTest, args.wizard, args.dependencies, args.purge, args.listTampers, args.hashFile, args.stdinPipe)):
+        if not any((args.direct, args.url, args.logFile, args.bulkFile, args.googleDork, args.configFile, args.requestFile, args.openApiFile, args.updateAll, args.smokeTest, args.vulnTest, args.fpTest, args.payloadLint, args.apiTest, args.wizard, args.dependencies, args.purge, args.listTampers, args.hashFile, args.stdinPipe)):
             errMsg = "missing a mandatory option (-d, -u, -l, -m, -r, -g, -c, --wizard, --shell, --update, --purge, --list-tampers or --dependencies). "
             errMsg += "Use -h for basic and -hh for advanced help\n"
             parser.error(errMsg)

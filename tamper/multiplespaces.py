@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -20,6 +20,14 @@ def dependencies():
 def tamper(payload, **kwargs):
     """
     Adds multiple spaces (' ') around SQL keywords
+
+    Tested against:
+        * MySQL 8.4.9
+        * MariaDB 11.8.8
+        * PostgreSQL 16.11
+        * SQLite 3.45.1
+        * Microsoft SQL Server 2022
+        * Oracle 23ai
 
     Notes:
         * Useful to bypass very weak and bespoke web application firewalls

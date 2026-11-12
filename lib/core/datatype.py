@@ -1,15 +1,47 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 import copy
-import types
+import threading
 
-from thirdparty.odict import OrderedDict
+from collections import OrderedDict
+from thirdparty import six
 from thirdparty.six.moves import collections_abc as _collections
+
+class NoLock(object):
+    """
+    No-op stand-in for a lock, used where the guarded operations are already atomic on their own
+
+    >>> with NoLock():
+    ...     True
+    True
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+def cacheLock(reentrant=False):
+    """
+    Returns a lock for guarding the (OrderedDict based) caches. Only Python 2 needs a real one, as its
+    OrderedDict is implemented in Python (#5619), while on Python 3 each operation is atomic. Moreover,
+    since Python 3.14 a Ctrl-C landing right after a lock got acquired by the 'with' statement leaves it
+    acquired forever (i.e. '__exit__' never gets called), hanging every thread that touches the cache
+
+    >>> isinstance(cacheLock(), NoLock) == six.PY3
+    True
+    """
+
+    if six.PY2:
+        return threading.RLock() if reentrant else threading.Lock()
+    else:
+        return NoLock()
 
 class AttribDict(dict):
     """
@@ -19,32 +51,44 @@ class AttribDict(dict):
     >>> foo.bar = 1
     >>> foo.bar
     1
+    >>> import copy; copy.deepcopy(foo).bar
+    1
     """
 
     def __init__(self, indict=None, attribute=None, keycheck=True):
         if indict is None:
             indict = {}
 
-        # Set any attributes here - before initialisation
-        # these remain as normal attributes
-        self.attribute = attribute
-        self.keycheck = keycheck
         dict.__init__(self, indict)
-        self.__initialised = True
-
-        # After initialisation, setting attributes
-        # is the same as setting an item
+        self.__dict__["_attribute"] = attribute
+        self.__dict__["_keycheck"] = keycheck
+        self.__dict__["_initialized"] = True
 
     def __getattr__(self, item):
         """
         Maps values to attributes
         Only called if there *is NOT* an attribute with this name
         """
+        if item.startswith('__') and item.endswith('__'):
+             raise AttributeError(item)
 
         try:
             return self.__getitem__(item)
         except KeyError:
-            if self.keycheck:
+            if self.__dict__.get("_keycheck"):
+                raise AttributeError("unable to access item '%s'" % item)
+            else:
+                return None
+
+    def __delattr__(self, item):
+        """
+        Deletes attributes
+        """
+
+        try:
+            return self.pop(item)
+        except KeyError:
+            if self.__dict__.get("_keycheck"):
                 raise AttributeError("unable to access item '%s'" % item)
             else:
                 return None
@@ -55,14 +99,8 @@ class AttribDict(dict):
         Only if we are initialised
         """
 
-        # This test allows attributes to be set in the __init__ method
-        if "_AttribDict__initialised" not in self.__dict__:
-            return dict.__setattr__(self, item, value)
-
-        # Any normal attributes are handled normally
-        elif item in self.__dict__:
-            dict.__setattr__(self, item, value)
-
+        if "_initialized" not in self.__dict__ or item in self.__dict__:
+            self.__dict__[item] = value
         else:
             self.__setitem__(item, value)
 
@@ -73,14 +111,12 @@ class AttribDict(dict):
         self.__dict__ = dict
 
     def __deepcopy__(self, memo):
-        retVal = self.__class__()
+        retVal = self.__class__(keycheck=self.__dict__.get("_keycheck"))
         memo[id(self)] = retVal
 
-        for attr in dir(self):
-            if not attr.startswith('_'):
-                value = getattr(self, attr)
-                if not isinstance(value, (types.BuiltinFunctionType, types.FunctionType, types.MethodType)):
-                    setattr(retVal, attr, copy.deepcopy(value, memo))
+        for attr, value in self.__dict__.items():
+            if attr not in ('_attribute', '_keycheck', '_initialized'):
+                setattr(retVal, attr, copy.deepcopy(value, memo))
 
         for key, value in self.items():
             retVal.__setitem__(key, copy.deepcopy(value, memo))
@@ -88,8 +124,8 @@ class AttribDict(dict):
         return retVal
 
 class InjectionDict(AttribDict):
-    def __init__(self):
-        AttribDict.__init__(self)
+    def __init__(self, **kwargs):
+        AttribDict.__init__(self, **kwargs)
 
         self.place = None
         self.parameter = None
@@ -129,6 +165,7 @@ class LRUDict(object):
     def __init__(self, capacity):
         self.capacity = capacity
         self.cache = OrderedDict()
+        self.__lock = cacheLock()
 
     def __len__(self):
         return len(self.cache)
@@ -137,20 +174,28 @@ class LRUDict(object):
         return key in self.cache
 
     def __getitem__(self, key):
-        value = self.cache.pop(key)
-        self.cache[key] = value
-        return value
+        with self.__lock:
+            value = self.cache.pop(key)
+            self.cache[key] = value
+            return value
 
-    def get(self, key):
-        return self.__getitem__(key)
+    def get(self, key, default=None):
+        try:
+            return self.__getitem__(key)
+        except (KeyError, TypeError):
+            return default
 
     def __setitem__(self, key, value):
-        try:
-            self.cache.pop(key)
-        except KeyError:
-            if len(self.cache) >= self.capacity:
-                self.cache.popitem(last=False)
-        self.cache[key] = value
+        with self.__lock:
+            try:
+                self.cache.pop(key)
+            except KeyError:
+                if len(self.cache) >= self.capacity:
+                    try:
+                        self.cache.popitem(last=False)
+                    except KeyError:    # Note: concurrently emptied by another thread (unlocked on Python 3)
+                        pass
+            self.cache[key] = value
 
     def set(self, key, value):
         self.__setitem__(key, value)

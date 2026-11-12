@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -27,6 +27,7 @@ from lib.core.exception import SqlmapNotVulnerableException
 from lib.core.exception import SqlmapSystemException
 from lib.core.exception import SqlmapUndefinedMethod
 from lib.core.exception import SqlmapUnsupportedDBMSException
+from lib.request import inject
 from lib.takeover.abstraction import Abstraction
 from lib.takeover.icmpsh import ICMPsh
 from lib.takeover.metasploit import Metasploit
@@ -45,6 +46,8 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry):
 
     def osCmd(self):
         if isStackingAvailable() or conf.direct:
+            web = False
+        elif Backend.isDbms(DBMS.PGSQL) and inject.getGadget():
             web = False
         elif not isStackingAvailable() and Backend.isDbms(DBMS.MYSQL):
             infoMsg = "going to use a web backdoor for command execution"
@@ -67,6 +70,8 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry):
 
     def osShell(self):
         if isStackingAvailable() or conf.direct:
+            web = False
+        elif Backend.isDbms(DBMS.PGSQL) and inject.getGadget():
             web = False
         elif not isStackingAvailable() and Backend.isDbms(DBMS.MYSQL):
             infoMsg = "going to use a web backdoor for command prompt"
@@ -122,7 +127,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry):
 
                 else:
                     warnMsg = "invalid value, valid values are '1' and '2'"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
         else:
             tunnel = 1
 
@@ -153,7 +158,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry):
             if os.path.exists(filename):
                 try:
                     with openFile(filename, "wb") as f:
-                        f.write("1")
+                        f.write(b"1")
                 except IOError as ex:
                     errMsg = "there has been a file opening/writing error "
                     errMsg += "for filename '%s' ('%s')" % (filename, getSafeExString(ex))
@@ -193,7 +198,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry):
 
                         else:
                             warnMsg = "invalid value, valid values are '1' and '2'"
-                            logger.warn(warnMsg)
+                            logger.warning(warnMsg)
 
                     if choice == 1:
                         goUdf = True
@@ -251,7 +256,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry):
                     warnMsg = "sqlmap does not implement any operating system "
                     warnMsg += "user privilege escalation technique when the "
                     warnMsg += "back-end DBMS underlying system is not Windows"
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
                 if tunnel == 1:
                     self.createMsfShellcode(exitfunc="process", format="raw", extra="BufferRegister=EAX", encode="x86/alpha_mixed")
@@ -326,7 +331,7 @@ class Takeover(Abstraction, Metasploit, ICMPsh, Registry):
             printWarn = False
 
         if printWarn:
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
         self.smb()
 

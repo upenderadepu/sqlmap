@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
+import binascii
 import re
 import time
 
@@ -29,6 +30,20 @@ from lib.core.settings import UNICODE_ENCODING
 from lib.utils.safe2bin import safecharencode
 from lib.utils.timeout import timeout
 
+def _hexifyBinary(value):
+    """
+    Renders a raw binary cell returned by a driver in -d mode as uppercase hex, instead of letting it reach
+    the text channel as a str() like '<memory at 0x...>' (PostgreSQL bytea -> psycopg2 memoryview) or a
+    control-character blob that gets blanked/corrupted (e.g. MSSQL varbinary -> bytes). Text columns come back
+    as native strings, so only genuine binary values are converted (matches HEX()-based rendering elsewhere).
+    """
+
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, (bytes, bytearray)):
+        return getUnicode(binascii.hexlify(value)).upper()
+    return value
+
 def direct(query, content=True):
     select = True
     query = agent.payloadDirect(query)
@@ -45,7 +60,10 @@ def direct(query, content=True):
                 break
 
     if select:
-        if re.search(r"(?i)\ASELECT ", query) is None:
+        # only auto-wrap a bare scalar expression (e.g. 'CURRENT_USER', '48*60') in SELECT; a user-supplied
+        # complete row-returning statement (--sql-query 'PRAGMA ...' / 'WITH ...' / 'EXPLAIN ...') must be left
+        # intact, otherwise 'SELECT PRAGMA ...' is a syntax error and silently returns nothing
+        if re.search(r"(?i)\A\s*(?:SELECT|WITH|PRAGMA|EXPLAIN|DESCRIBE|DESC|SHOW|TABLE|VALUES)\b", query) is None:
             query = "SELECT %s" % query
 
         if conf.binaryFields:
@@ -63,9 +81,15 @@ def direct(query, content=True):
         timeout(func=conf.dbmsConnector.execute, args=(query,), duration=conf.timeout, default=None)
     elif not (output and ("%soutput" % conf.tablePrefix) not in query and ("%sfile" % conf.tablePrefix) not in query):
         output, state = timeout(func=conf.dbmsConnector.select, args=(query,), duration=conf.timeout, default=None)
+        if output and isListLike(output):
+            output = [tuple(_hexifyBinary(_) for _ in row) if isListLike(row) else _hexifyBinary(row) for row in output]
         if state == TIMEOUT_STATE.NORMAL:
             hashDBWrite(query, output, True)
-        elif state == TIMEOUT_STATE.TIMEOUT:
+        elif state in (TIMEOUT_STATE.TIMEOUT, TIMEOUT_STATE.EXCEPTION):
+            # a timed-out OR fatally-errored query (e.g. the connector raised SqlmapConnectionException, or the
+            # connection dropped mid-scan) left the connection unusable; reconnect so the rest of the scan
+            # recovers instead of every following query being silently swallowed to None (wrong/empty data).
+            # A genuinely dead DB makes connect() raise here and the scan aborts cleanly, as with TIMEOUT.
             conf.dbmsConnector.close()
             conf.dbmsConnector.connect()
     elif output:

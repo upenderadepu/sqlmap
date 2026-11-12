@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -27,7 +27,9 @@ try:
 except ImportError:
     pass
 
-_protocols = filterNone(getattr(ssl, _, None) for _ in ("PROTOCOL_TLSv1_2", "PROTOCOL_TLSv1_1", "PROTOCOL_TLSv1", "PROTOCOL_SSLv3", "PROTOCOL_SSLv23", "PROTOCOL_SSLv2"))
+_protocols = filterNone(getattr(ssl, _, None) for _ in ("PROTOCOL_TLS_CLIENT", "PROTOCOL_TLSv1_2", "PROTOCOL_TLSv1_1", "PROTOCOL_TLSv1", "PROTOCOL_SSLv3", "PROTOCOL_SSLv23", "PROTOCOL_SSLv2"))
+# Note: SNI (i.e. server_hostname) is a TLS extension, hence only those are used in here (Note: PROTOCOL_TLSv1 is not compiled in on OpenSSL builds without TLS 1.0 support)
+_tlsProtocols = filterNone(getattr(ssl, _, None) for _ in ("PROTOCOL_TLS_CLIENT", "PROTOCOL_TLSv1_2", "PROTOCOL_TLSv1_1", "PROTOCOL_TLSv1"))
 _lut = dict((getattr(ssl, _), _) for _ in dir(ssl) if _.startswith("PROTOCOL_"))
 _contexts = {}
 
@@ -36,6 +38,8 @@ class HTTPSConnection(_http_client.HTTPSConnection):
     Connection class that enables usage of newer SSL protocols.
 
     Reference: http://bugs.python.org/msg128686
+
+    NOTE: use https://check-tls.akamaized.net/ to check if (e.g.) TLS/SNI is working properly
     """
 
     def __init__(self, *args, **kwargs):
@@ -61,19 +65,40 @@ class HTTPSConnection(_http_client.HTTPSConnection):
 
         # Reference(s): https://docs.python.org/2/library/ssl.html#ssl.SSLContext
         #               https://www.mnot.net/blog/2014/12/27/python_2_and_tls_sni
-        if re.search(r"\A[\d.]+\Z", conf.hostname or "") is None and kb.tlsSNI.get(conf.hostname) is not False and hasattr(ssl, "SSLContext"):
-            for protocol in (_ for _ in _protocols if _ >= ssl.PROTOCOL_TLSv1):
+        if hasattr(ssl, "SSLContext"):
+            for protocol in (_ for _ in _protocols if _ in _tlsProtocols):
+                sock = None
                 try:
                     sock = create_sock()
                     if protocol not in _contexts:
                         _contexts[protocol] = ssl.SSLContext(protocol)
+
+                        # Disable certificate and hostname validation enabled by default with PROTOCOL_TLS_CLIENT
+                        _contexts[protocol].check_hostname = False
+                        _contexts[protocol].verify_mode = ssl.CERT_NONE
+
+                        if getattr(self, "cert_file", None) and getattr(self, "key_file", None):
+                            _contexts[protocol].load_cert_chain(certfile=self.cert_file, keyfile=self.key_file)
                         try:
                             # Reference(s): https://askubuntu.com/a/1263098
                             #               https://askubuntu.com/a/1250807
-                            _contexts[protocol].set_ciphers("DEFAULT@SECLEVEL=1")
-                        except ssl.SSLError:
+                            #               https://git.zknt.org/mirror/bazarr/commit/7f05f932ffb84ba8b9e5630b2adc34dbd77e2b4a?style=split&whitespace=show-all&show-outdated=
+                            _contexts[protocol].set_ciphers("ALL@SECLEVEL=0")
+                        except (ssl.SSLError, AttributeError):
                             pass
-                    result = _contexts[protocol].wrap_socket(sock, do_handshake_on_connect=True, server_hostname=conf.hostname)
+
+                    hostname = self.host
+                    if conf.host:
+                        hostname = conf.host
+                    else:
+                        for header, value in conf.httpHeaders:
+                            if header.lower() == "host":
+                                match = re.search(r"\A\[(?P<hostname>.+)\](:\d+)?\Z", value.strip())
+                                hostname = match.group("hostname") if match else value.rsplit(":", 1)[0] if ":" in value else value
+                                break
+                    hostname = hostname if re.search(r"\A[\d.]+\Z", hostname or "") is None else None
+                    result = _contexts[protocol].wrap_socket(sock, do_handshake_on_connect=True, server_hostname=hostname)
+
                     if result:
                         success = True
                         self.sock = result
@@ -82,18 +107,17 @@ class HTTPSConnection(_http_client.HTTPSConnection):
                         break
                     else:
                         sock.close()
-                except (ssl.SSLError, socket.error, _http_client.BadStatusLine) as ex:
+                except (ssl.SSLError, socket.error, _http_client.BadStatusLine, AttributeError) as ex:
                     self._tunnel_host = None
+                    if sock:
+                        sock.close()
                     logger.debug("SSL connection error occurred for '%s' ('%s')" % (_lut[protocol], getSafeExString(ex)))
 
-            if kb.tlsSNI.get(conf.hostname) is None:
-                kb.tlsSNI[conf.hostname] = success
-
-        if not success:
+        elif hasattr(ssl, "wrap_socket"):
             for protocol in _protocols:
                 try:
                     sock = create_sock()
-                    _ = ssl.wrap_socket(sock, self.key_file, self.cert_file, ssl_version=protocol)
+                    _ = ssl.wrap_socket(sock, keyfile=getattr(self, "key_file"), certfile=getattr(self, "cert_file"), ssl_version=protocol)
                     if _:
                         success = True
                         self.sock = _

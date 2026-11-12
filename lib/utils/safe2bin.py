@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -12,14 +12,16 @@ import sys
 
 PY3 = sys.version_info >= (3, 0)
 
-if PY3:
+try:
+    # Py2
+    text_type = unicode
+    string_types = (basestring,)
+except NameError:
+    # Py3
     xrange = range
     text_type = str
     string_types = (str,)
     unichr = chr
-else:
-    text_type = unicode
-    string_types = (basestring,)
 
 # Regex used for recognition of hex encoded characters
 HEX_ENCODED_CHAR_REGEX = r"(?P<result>\\x[0-9A-Fa-f]{2})"
@@ -53,6 +55,9 @@ def safecharencode(value):
 
     if isinstance(value, string_types):
         if any(_ not in SAFE_CHARS for _ in value):
+            # NOTE (checked twice, do NOT "fix" by deleting): this marker keeps an already-`\x`-carrying
+            # value (incl. getUnicode's 'reversible' \xNN) from double-escaping to `\\x` in console/CSV.
+            # Dropping it only swaps that for the rare literal-`\x`-in-data round-trip - a bad trade.
             retVal = retVal.replace(HEX_ENCODED_PREFIX, HEX_ENCODED_PREFIX_MARKER)
             retVal = retVal.replace('\\', SLASH_MARKER)
 
@@ -74,6 +79,11 @@ def safecharencode(value):
 def safechardecode(value, binary=False):
     """
     Reverse function to safecharencode
+
+    >>> safechardecode(u'test123') == u'test123'
+    True
+    >>> safechardecode(safecharencode(u'test\x01\x02\xaf')) == u'test\x01\x02\xaf'
+    True
     """
 
     retVal = value

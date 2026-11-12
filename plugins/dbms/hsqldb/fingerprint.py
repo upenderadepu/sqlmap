@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -99,18 +99,18 @@ class Fingerprint(GenericFingerprint):
             infoMsg = "confirming %s" % DBMS.HSQLDB
             logger.info(infoMsg)
 
-            result = inject.checkBooleanExpression("ROUNDMAGIC(PI())>=3")
+            result = inject.checkBooleanExpression("ROUNDMAGIC(PI())>=3")    # Note: same check without the blacklisted LEAST()
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.HSQLDB
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return False
             else:
                 result = inject.checkBooleanExpression("ZERO() IS 0")   # Note: check for H2 DBMS (sharing majority of same functions)
                 if result:
                     warnMsg = "the back-end DBMS is not %s" % DBMS.HSQLDB
-                    logger.warn(warnMsg)
+                    logger.warning(warnMsg)
 
                     return False
 
@@ -134,7 +134,7 @@ class Fingerprint(GenericFingerprint):
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.HSQLDB
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             dbgMsg = "...or version is < 1.7.2"
             logger.debug(dbgMsg)
@@ -143,7 +143,7 @@ class Fingerprint(GenericFingerprint):
 
     def getHostname(self):
         warnMsg = "on HSQLDB it is not possible to enumerate the hostname"
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
     def checkDbmsOs(self, detailed=False):
         if Backend.getOs():

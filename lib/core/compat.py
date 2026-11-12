@@ -1,17 +1,20 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 from __future__ import division
 
+import codecs
 import binascii
 import functools
+import io
 import math
 import os
 import random
+import re
 import sys
 import time
 import uuid
@@ -167,7 +170,26 @@ class WichmannHill(random.Random):
 
 def patchHeaders(headers):
     if headers is not None and not hasattr(headers, "headers"):
+        if isinstance(headers, dict):
+            class _(dict):
+                def __getitem__(self, key):
+                    for key_ in self:
+                        if key_.lower() == key.lower():
+                            return super(_, self).__getitem__(key_)
+
+                    raise KeyError(key)
+
+                def get(self, key, default=None):
+                    try:
+                        return self[key]
+                    except KeyError:
+                        return default
+
+            headers = _(headers)
+
         headers.headers = ["%s: %s\r\n" % (header, headers[header]) for header in headers]
+
+    return headers
 
 def cmp(a, b):
     """
@@ -259,6 +281,139 @@ else:
     buffer = buffer
 
 try:
-    from pkg_resources import parse_version as LooseVersion
-except ImportError:
-    from distutils.version import LooseVersion
+    RecursionError = RecursionError
+except NameError:
+    # Note: patch for Python < 3.5 (RecursionError, a subclass of RuntimeError, was introduced in Python 3.5)
+    RecursionError = RuntimeError
+
+def LooseVersion(version):
+    """
+    >>> LooseVersion("1.0") == LooseVersion("1.0")
+    True
+    >>> LooseVersion("1.0.1") > LooseVersion("1.0")
+    True
+    >>> LooseVersion("1.0.11") < LooseVersion("1.0.111")
+    True
+    >>> LooseVersion("8.0.22") > LooseVersion("8.0.2")
+    True
+    >>> LooseVersion("1.0alpha-beta-gama")
+    (1, 0)
+    """
+    match = re.search(r"\A(\d[\d.]*)", version or "")
+    if match:
+        return tuple(int(part) for part in match.group(1).strip('.').split('.') if part.isdigit())
+    else:
+        return ()
+
+# NOTE: codecs.open re-implementation (deprecated in Python 3.14)
+
+try:
+    # Py2
+    _text_type = unicode
+    _bytes_types = (str, bytearray)
+except NameError:
+    # Py3
+    _text_type = str
+    _bytes_types = (bytes, bytearray, memoryview)
+
+_WRITE_CHARS = ("w", "a", "x", "+")
+
+def _is_write_mode(mode):
+    return any(ch in mode for ch in _WRITE_CHARS)
+
+class MixedWriteTextIO(object):
+    """
+    Text-ish stream wrapper that accepts both text and bytes in write().
+    Bytes are decoded using the file's (encoding, errors) before writing.
+
+    Optionally approximates line-buffering by flushing when a newline is written.
+    """
+    def __init__(self, fh, encoding, errors, line_buffered=False):
+        self._fh = fh
+        self._encoding = encoding
+        self._errors = errors
+        self._line_buffered = line_buffered
+
+    def write(self, data):
+        # bytes-like but not text -> decode
+        if isinstance(data, _bytes_types) and not isinstance(data, _text_type):
+            data = bytes(data).decode(self._encoding, self._errors)
+        elif not isinstance(data, _text_type):
+            data = _text_type(data)
+
+        n = self._fh.write(data)
+
+        # Approximate "line buffering" behavior if requested
+        if self._line_buffered and u"\n" in data:
+            try:
+                self._fh.flush()
+            except Exception:
+                pass
+
+        return n
+
+    def writelines(self, lines):
+        for x in lines:
+            self.write(x)
+
+    def __iter__(self):
+        return iter(self._fh)
+
+    def __next__(self):
+        return next(self._fh)
+
+    def next(self):  # Py2
+        return self.__next__()
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+    def __enter__(self):
+        self._fh.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._fh.__exit__(exc_type, exc, tb)
+
+
+def _codecs_open(filename, mode="r", encoding=None, errors="strict", buffering=-1):
+    """
+    Replacement for deprecated codecs.open() entry point with sqlmap-friendly behavior.
+
+    - If encoding is None: return io.open(...) as-is.
+    - If encoding is set: force underlying binary mode and wrap via StreamReaderWriter
+      (like codecs.open()).
+    - For write-ish modes: return a wrapper that also accepts bytes on .write().
+    - Handles buffering=1 in binary mode by downgrading underlying buffering to -1,
+      while optionally preserving "flush on newline" behavior in the wrapper.
+    """
+    if encoding is None:
+        return io.open(filename, mode, buffering=buffering)
+
+    bmode = mode
+    if "b" not in bmode:
+        bmode += "b"
+
+    # Avoid line-buffering warnings/errors on binary streams
+    line_buffered = (buffering == 1)
+    if line_buffered:
+        buffering = -1
+
+    f = io.open(filename, bmode, buffering=buffering)
+
+    try:
+        info = codecs.lookup(encoding)
+        srw = codecs.StreamReaderWriter(f, info.streamreader, info.streamwriter, errors)
+        srw.encoding = encoding
+
+        if _is_write_mode(mode):
+            return MixedWriteTextIO(srw, encoding, errors, line_buffered=line_buffered)
+
+        return srw
+    except Exception:
+        try:
+            f.close()
+        finally:
+            raise
+
+codecs_open = _codecs_open if sys.version_info >= (3, 14) else codecs.open

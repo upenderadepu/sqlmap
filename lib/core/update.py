@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -18,7 +18,6 @@ from lib.core.common import extractRegexResult
 from lib.core.common import getLatestRevision
 from lib.core.common import getSafeExString
 from lib.core.common import openFile
-from lib.core.common import pollProcess
 from lib.core.common import readInput
 from lib.core.convert import getText
 from lib.core.data import conf
@@ -51,7 +50,6 @@ def update():
         output = ""
         try:
             process = subprocess.Popen("pip install -U sqlmap", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=paths.SQLMAP_ROOT_PATH)
-            pollProcess(process, True)
             output, _ = process.communicate()
             success = not process.returncode
         except Exception as ex:
@@ -68,10 +66,10 @@ def update():
     elif not os.path.exists(os.path.join(paths.SQLMAP_ROOT_PATH, ".git")):
         warnMsg = "not a git repository. It is recommended to clone the 'sqlmapproject/sqlmap' repository "
         warnMsg += "from GitHub (e.g. 'git clone --depth 1 %s sqlmap')" % GIT_REPOSITORY
-        logger.warn(warnMsg)
+        logger.warning(warnMsg)
 
         if VERSION == getLatestRevision():
-            logger.info("already at the latest revision '%s'" % getRevisionNumber())
+            logger.info("already at the latest revision '%s'" % (getRevisionNumber() or VERSION))
             return
 
         message = "do you want to try to fetch the latest 'zipball' from repository and extract it (experimental) ? [y/N]"
@@ -110,7 +108,7 @@ def update():
 
                         filepath = os.path.join(paths.SQLMAP_ROOT_PATH, "lib", "core", "settings.py")
                         if os.path.isfile(filepath):
-                            with openFile(filepath, "rb") as f:
+                            with openFile(filepath, "r") as f:
                                 version = re.search(r"(?m)^VERSION\s*=\s*['\"]([^'\"]+)", f.read()).group(1)
                                 logger.info("updated to the latest version '%s#dev'" % version)
                                 success = True
@@ -138,7 +136,6 @@ def update():
         output = ""
         try:
             process = subprocess.Popen("git checkout . && git pull %s HEAD" % GIT_REPOSITORY, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=paths.SQLMAP_ROOT_PATH)
-            pollProcess(process, True)
             output, _ = process.communicate()
             success = not process.returncode
         except Exception as ex:
@@ -163,7 +160,7 @@ def update():
             infoMsg += "to use a GitHub for Windows client for updating "
             infoMsg += "purposes (https://desktop.github.com/) or just "
             infoMsg += "download the latest snapshot from "
-            infoMsg += "https://github.com/sqlmapproject/sqlmap/downloads"
+            infoMsg += "https://github.com/sqlmapproject/sqlmap/releases"
         else:
             infoMsg = "for Linux platform it's recommended "
             infoMsg += "to install a standard 'git' package (e.g.: 'apt install git')"

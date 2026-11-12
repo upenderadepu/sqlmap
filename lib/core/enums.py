@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -52,6 +52,7 @@ class DBMS(object):
     PRESTO = "Presto"
     ALTIBASE = "Altibase"
     MIMERSQL = "MimerSQL"
+    CLICKHOUSE = "ClickHouse"
     CRATEDB = "CrateDB"
     CUBRID = "Cubrid"
     CACHE = "InterSystems Cache"
@@ -59,6 +60,9 @@ class DBMS(object):
     FRONTBASE = "FrontBase"
     RAIMA = "Raima Database Manager"
     VIRTUOSO = "Virtuoso"
+    SNOWFLAKE = "Snowflake"
+    SPANNER = "Spanner"
+    HANA = "SAP HANA"
 
 class DBMS_DIRECTORY_NAME(object):
     ACCESS = "access"
@@ -81,6 +85,7 @@ class DBMS_DIRECTORY_NAME(object):
     PRESTO = "presto"
     ALTIBASE = "altibase"
     MIMERSQL = "mimersql"
+    CLICKHOUSE = "clickhouse"
     CRATEDB = "cratedb"
     CUBRID = "cubrid"
     CACHE = "cache"
@@ -88,6 +93,9 @@ class DBMS_DIRECTORY_NAME(object):
     FRONTBASE = "frontbase"
     RAIMA = "raima"
     VIRTUOSO = "virtuoso"
+    SNOWFLAKE = "snowflake"
+    SPANNER = "spanner"
+    HANA = "hana"
 
 class FORK(object):
     MARIADB = "MariaDB"
@@ -104,6 +112,12 @@ class FORK(object):
     YELLOWBRICK = "Yellowbrick"
     IRIS = "Iris"
     YUGABYTEDB = "YugabyteDB"
+    OPENGAUSS = "OpenGauss"
+    DM8 = "DM8"
+    DORIS = "Doris"
+    STARROCKS = "StarRocks"
+    TRINO = "Trino"
+    DUCKDB = "DuckDB"
 
 class CUSTOM_LOGGING(object):
     PAYLOAD = 9
@@ -132,6 +146,7 @@ class POST_HINT(object):
     MULTIPART = "MULTIPART"
     XML = "XML (generic)"
     ARRAY_LIKE = "Array-like"
+    GRPC_WEB = "gRPC-Web"
 
 class HTTPMETHOD(object):
     GET = "GET"
@@ -169,10 +184,13 @@ class HASH(object):
     MYSQL = r'(?i)\A\*[0-9a-f]{40}\Z'
     MYSQL_OLD = r'(?i)\A(?![0-9]+\Z)[0-9a-f]{16}\Z'
     POSTGRES = r'(?i)\Amd5[0-9a-f]{32}\Z'
+    POSTGRES_SCRAM = r'\ASCRAM-SHA-256\$\d+:[A-Za-z0-9+/]+={0,2}\$[A-Za-z0-9+/]+={0,2}:[A-Za-z0-9+/]+={0,2}\Z'
+    MYSQL_SHA2 = r'\A\$mysql\$A\$[0-9A-Fa-f]{3}\*[0-9A-Fa-f]{40}\*[0-9A-Fa-f]{86}\Z'
     MSSQL = r'(?i)\A0x0100[0-9a-f]{8}[0-9a-f]{40}\Z'
     MSSQL_OLD = r'(?i)\A0x0100[0-9a-f]{8}[0-9a-f]{80}\Z'
     MSSQL_NEW = r'(?i)\A0x0200[0-9a-f]{8}[0-9a-f]{128}\Z'
     ORACLE = r'(?i)\As:[0-9a-f]{60}\Z'
+    ORACLE_12C = r'(?i)\At:[0-9a-f]{160}\Z'
     ORACLE_OLD = r'(?i)\A[0-9a-f]{16}\Z'
     MD5_GENERIC = r'(?i)\A(0x)?[0-9a-f]{32}\Z'
     SHA1_GENERIC = r'(?i)\A(0x)?[0-9a-f]{40}\Z'
@@ -181,36 +199,46 @@ class HASH(object):
     SHA384_GENERIC = r'(?i)\A[0-9a-f]{96}\Z'
     SHA512_GENERIC = r'(?i)\A(0x)?[0-9a-f]{128}\Z'
     CRYPT_GENERIC = r'\A(?!\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\Z)(?![0-9]+\Z)[./0-9A-Za-z]{13}\Z'
+    SHA256_UNIX_CRYPT = r'\A\$5\$(?:rounds=\d+\$)?[./0-9A-Za-z]{1,16}\$[./0-9A-Za-z]{43}\Z'
+    SHA512_UNIX_CRYPT = r'\A\$6\$(?:rounds=\d+\$)?[./0-9A-Za-z]{1,16}\$[./0-9A-Za-z]{86}\Z'
     JOOMLA = r'\A[0-9a-f]{32}:\w{32}\Z'
-    PHPASS = r'\A\$[PHQS]\$[./0-9a-zA-Z]{31}\Z'
+    PHPASS = r'\A\$(?:[PHQ]\$[./0-9a-zA-Z]{31}|S\$[./0-9a-zA-Z]{52})\Z'  # $P$/$H$/$Q$ (WordPress/phpBB) are 34 chars; Drupal 7 '$S$' is 55 (DRUPAL_HASH_LENGTH)
     APACHE_MD5_CRYPT = r'\A\$apr1\$.{1,8}\$[./a-zA-Z0-9]+\Z'
     UNIX_MD5_CRYPT = r'\A\$1\$.{1,8}\$[./a-zA-Z0-9]+\Z'
     APACHE_SHA1 = r'\A\{SHA\}[a-zA-Z0-9+/]+={0,2}\Z'
     VBULLETIN = r'\A[0-9a-fA-F]{32}:.{30}\Z'
     VBULLETIN_OLD = r'\A[0-9a-fA-F]{32}:.{3}\Z'
+    OSCOMMERCE_OLD = r'\A[0-9a-fA-F]{32}:.{2}\Z'
     SSHA = r'\A\{SSHA\}[a-zA-Z0-9+/]+={0,2}\Z'
     SSHA256 = r'\A\{SSHA256\}[a-zA-Z0-9+/]+={0,2}\Z'
     SSHA512 = r'\A\{SSHA512\}[a-zA-Z0-9+/]+={0,2}\Z'
-    DJANGO_MD5 = r'\Amd5\$[^$]+\$[0-9a-f]{32}\Z'
-    DJANGO_SHA1 = r'\Asha1\$[^$]+\$[0-9a-f]{40}\Z'
+    DJANGO_MD5 = r'\Amd5\$[^$]*\$[0-9a-f]{32}\Z'
+    DJANGO_SHA1 = r'\Asha1\$[^$]*\$[0-9a-f]{40}\Z'
+    DJANGO_PBKDF2_SHA256 = r'\Apbkdf2_sha256\$\d+\$[^$]+\$[A-Za-z0-9+/]+={0,2}\Z'
+    WERKZEUG_PBKDF2 = r'\Apbkdf2:(?:sha1|sha256|sha512):\d+\$[^$]+\$[0-9a-f]+\Z'
+    WERKZEUG_SCRYPT = r'\Ascrypt:\d+:\d+:\d+\$[^$]+\$[0-9a-f]+\Z'
+    BCRYPT = r'\A\$2[abxy]\$\d{2}\$[./A-Za-z0-9]{53}\Z'
+    WORDPRESS_BCRYPT = r'\A\$wp\$2[abxy]\$\d{2}\$[./A-Za-z0-9]{53}\Z'
+    ARGON2 = r'\A\$argon2(?:id|i|d)\$v=\d+\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]+={0,2}\$[A-Za-z0-9+/]+={0,2}\Z'
+    ASPNET_IDENTITY = r'\AAQAAAA[A-Za-z0-9+/]{76}==\Z'
     MD5_BASE64 = r'\A[a-zA-Z0-9+/]{22}==\Z'
     SHA1_BASE64 = r'\A[a-zA-Z0-9+/]{27}=\Z'
     SHA256_BASE64 = r'\A[a-zA-Z0-9+/]{43}=\Z'
     SHA512_BASE64 = r'\A[a-zA-Z0-9+/]{86}==\Z'
 
-# Reference: http://www.zytrax.com/tech/web/mobile_ids.html
+# Reference: https://whatmyuseragent.com/brand/
 class MOBILES(object):
     BLACKBERRY = ("BlackBerry Z10", "Mozilla/5.0 (BB10; Kbd) AppleWebKit/537.35+ (KHTML, like Gecko) Version/10.3.3.2205 Mobile Safari/537.35+")
-    GALAXY = ("Samsung Galaxy S8", "Mozilla/5.0 (Linux; Android 8.0.0; SM-G955U Build/R16NW; en-us) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.136 Mobile Safari/537.36 Puffin/9.0.0.50263AP")
+    GALAXY = ("Samsung Galaxy A54",  "Mozilla/5.0 (Linux; Android 15; SM-A546B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7339.155 Mobile Safari/537.36 AirWatchBrowser/25.08.0.2131")
     HP = ("HP iPAQ 6365", "Mozilla/4.0 (compatible; MSIE 4.01; Windows CE; PPC; 240x320; HP iPAQ h6300)")
-    HTC = ("HTC 10", "Mozilla/5.0 (Linux; Android 8.0.0; HTC 10 Build/OPR1.170623.027) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/69.0.3497.100 Mobile Safari/537.36")
-    HUAWEI = ("Huawei P8", "Mozilla/5.0 (Linux; Android 4.4.4; HUAWEI H891L Build/HuaweiH891L) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/33.0.0.0 Mobile Safari/537.36")
-    IPHONE = ("Apple iPhone 8", "Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1")
-    LUMIA = ("Microsoft Lumia 950", "Mozilla/5.0 (Windows Phone 10.0; Android 6.0.1; Microsoft; Lumia 950) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Mobile Safari/537.36 Edge/15.15063")
+    HTC = ("HTC One X2", "Mozilla/5.0 (Linux; Android 14; X2-HT) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.7204.46 Mobile Safari/537.36")
+    HUAWEI = ("Huawei Honor 90 Pro", "Mozilla/5.0 (Linux; Android 15; REP-AN00 Build/HONORREP-AN00; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/133.0.6943.137 Mobile Safari/537.36")
+    IPHONE = ("Apple iPhone 15 Pro Max", "Mozilla/7.0 (iPhone; CPU iPhone OS 18_7; iPhone 15 Pro Max) AppleWebKit/533.2 (KHTML, like Gecko) CriOS/126.0.6478.35 Mobile/15E148 Safari/804.17")
+    LUMIA = ("Microsoft Lumia 950 XL", "Mozilla/5.0 (Windows Mobile 10; Android 10.0;Microsoft;Lumia 950XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 Edge/40.15254.603")
     NEXUS = ("Google Nexus 7", "Mozilla/5.0 (Linux; Android 4.1.1; Nexus 7 Build/JRO03D) AppleWebKit/535.19 (KHTML, like Gecko) Chrome/18.0.1025.166 Safari/535.19")
     NOKIA = ("Nokia N97", "Mozilla/5.0 (SymbianOS/9.4; Series60/5.0 NokiaN97-1/10.0.012; Profile/MIDP-2.1 Configuration/CLDC-1.1; en-us) AppleWebKit/525 (KHTML, like Gecko) WicKed/7.1.12344")
-    PIXEL = ("Google Pixel", "Mozilla/5.0 (Linux; Android 10; Pixel) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.117 Mobile Safari/537.36")
-    XIAOMI = ("Xiaomi Mi 8 Pro", "Mozilla/5.0 (Linux; Android 9; MI 8 Pro Build/PKQ1.180729.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/87.0.4280.66 Mobile Safari/537.36")
+    PIXEL = ("Google Pixel 9", "Mozilla/5.0 (Linux; Android 14; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/24.0 Chrome/139.0.0.0 Mobile Safari/537.36")
+    XIAOMI = ("Xiaomi Redmi 15C", "Mozilla/5.0 (Linux; Android 15; REDMI 15C Build/AP3A.240905.015.A2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.118 Mobile Safari/537.36 XiaoMi/MiuiBrowser/14.43.0-gn")
 
 class PROXY_TYPE(object):
     HTTP = "HTTP"
@@ -227,6 +255,7 @@ class DUMP_FORMAT(object):
     CSV = "CSV"
     HTML = "HTML"
     SQLITE = "SQLITE"
+    JSONL = "JSONL"
 
 class HTTP_HEADER(object):
     ACCEPT = "Accept"
@@ -253,6 +282,7 @@ class HTTP_HEADER(object):
     RANGE = "Range"
     REFERER = "Referer"
     REFRESH = "Refresh"  # Reference: http://stackoverflow.com/a/283794
+    RETRY_AFTER = "Retry-After"
     SERVER = "Server"
     SET_COOKIE = "Set-Cookie"
     TRANSFER_ENCODING = "Transfer-Encoding"
@@ -275,7 +305,9 @@ class OPTION_TYPE(object):
 class HASHDB_KEYS(object):
     DBMS = "DBMS"
     DBMS_FORK = "DBMS_FORK"
+    MYSQL_UTF8MB4 = "MYSQL_UTF8MB4"
     CHECK_WAF_RESULT = "CHECK_WAF_RESULT"
+    CHECK_WAF_BYPASS = "CHECK_WAF_BYPASS"
     CHECK_NULL_CONNECTION_RESULT = "CHECK_NULL_CONNECTION_RESULT"
     CONF_TMP_PATH = "CONF_TMP_PATH"
     KB_ABS_FILE_PATHS = "KB_ABS_FILE_PATHS"
@@ -309,6 +341,8 @@ class PAYLOAD(object):
         4: "Double quoted string",
         5: "LIKE double quoted string",
         6: "Identifier (e.g. column name)",
+        7: "Block comment",
+        8: "Alternative quoted string",
     }
 
     RISK = {
@@ -318,18 +352,17 @@ class PAYLOAD(object):
         3: "High risk",
     }
 
-    CLAUSE = {
-        0: "Always",
-        1: "WHERE",
-        2: "GROUP BY",
-        3: "ORDER BY",
-        4: "LIMIT",
-        5: "OFFSET",
-        6: "TOP",
-        7: "Table name",
-        8: "Column name",
-        9: "Pre-WHERE (non-query)",
-    }
+    class CLAUSE(object):
+        ALWAYS = 0
+        WHERE = 1
+        GROUP_BY = 2
+        ORDER_BY = 3
+        LIMIT = 4
+        OFFSET = 5
+        TOP = 6
+        TABLE_NAME = 7
+        COLUMN_NAME = 8
+        PRE_WHERE = 9
 
     class METHOD(object):
         COMPARISON = "comparison"
@@ -365,6 +398,7 @@ class WEB_PLATFORM(object):
     ASP = "asp"
     ASPX = "aspx"
     JSP = "jsp"
+    CFM = "cfm"
 
 class CONTENT_TYPE(object):
     TARGET = 0
@@ -394,6 +428,9 @@ class CONTENT_TYPE(object):
     OS_CMD = 24
     REG_READ = 25
     STATEMENTS = 26
+    PROCEDURES = 27
+    LINKS = 28
+    AUDIT = 29
 
 class CONTENT_STATUS(object):
     IN_PROGRESS = 0
@@ -404,6 +441,7 @@ class AUTH_TYPE(object):
     DIGEST = "digest"
     BEARER = "bearer"
     NTLM = "ntlm"
+    NEGOTIATE = "negotiate"
     PKI = "pki"
 
 class AUTOCOMPLETE_TYPE(object):
@@ -426,6 +464,7 @@ class MKSTEMP_PREFIX(object):
     BIG_ARRAY = "sqlmapbigarray-"
     SPECIFIC_RESPONSE = "sqlmapresponse-"
     PREPROCESS = "sqlmappreprocess-"
+    AUTH_REFRESH = "sqlmapauthrefresh-"
 
 class TIMEOUT_STATE(object):
     NORMAL = 0

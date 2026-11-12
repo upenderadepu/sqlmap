@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
@@ -64,14 +64,19 @@ def configFileParser(configFile):
     logger.debug(debugMsg)
 
     checkFile(configFile)
-    configFP = openFile(configFile, "rb")
+    configFP = openFile(configFile, 'r')
 
     try:
         config = UnicodeRawConfigParser()
-        config.readfp(configFP)
+        if hasattr(config, "read_file"):
+            config.read_file(configFP)
+        else:
+            config.readfp(configFP)
     except Exception as ex:
         errMsg = "you have provided an invalid and/or unreadable configuration file ('%s')" % getSafeExString(ex)
         raise SqlmapSyntaxException(errMsg)
+    finally:
+        configFP.close()
 
     if not config.has_section("Target"):
         errMsg = "missing a mandatory section 'Target' in the configuration file"
@@ -79,14 +84,14 @@ def configFileParser(configFile):
 
     mandatory = False
 
-    for option in ("direct", "url", "logFile", "bulkFile", "googleDork", "requestFile", "wizard"):
+    for option in ("direct", "url", "logFile", "bulkFile", "googleDork", "requestFile", "openApiFile", "wizard"):
         if config.has_option("Target", option) and config.get("Target", option) or cmdLineOptions.get(option):
             mandatory = True
             break
 
     if not mandatory:
         errMsg = "missing a mandatory option in the configuration file "
-        errMsg += "(direct, url, logFile, bulkFile, googleDork, requestFile or wizard)"
+        errMsg += "(direct, url, logFile, bulkFile, googleDork, requestFile, openApiFile or wizard)"
         raise SqlmapMissingMandatoryOptionException(errMsg)
 
     for family, optionData in optDict.items():

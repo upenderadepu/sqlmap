@@ -1,16 +1,20 @@
 #!/usr/bin/env python
 
 """
-Copyright (c) 2006-2021 sqlmap developers (https://sqlmap.org/)
+Copyright (c) 2006-2026 sqlmap developers (https://sqlmap.org)
 See the file 'LICENSE' for copying permission
 """
 
 from lib.core.common import Backend
 from lib.core.common import Format
+from lib.core.common import hashDBRetrieve
+from lib.core.common import hashDBWrite
 from lib.core.data import conf
 from lib.core.data import kb
 from lib.core.data import logger
 from lib.core.enums import DBMS
+from lib.core.enums import FORK
+from lib.core.enums import HASHDB_KEYS
 from lib.core.session import setDbms
 from lib.core.settings import PRESTO_ALIASES
 from lib.request import inject
@@ -21,6 +25,18 @@ class Fingerprint(GenericFingerprint):
         GenericFingerprint.__init__(self, DBMS.PRESTO)
 
     def getFingerprint(self):
+        fork = hashDBRetrieve(HASHDB_KEYS.DBMS_FORK)
+
+        if fork is None:
+            # Trino (the PrestoSQL fork) exposes functions PrestoDB never added (e.g. SOUNDEX),
+            # so a NULL-based probe on one of them distinguishes the fork from the original.
+            if inject.checkBooleanExpression("SOUNDEX(NULL) IS NULL"):
+                fork = FORK.TRINO
+            else:
+                fork = ""
+
+            hashDBWrite(HASHDB_KEYS.DBMS_FORK, fork)
+
         value = ""
         wsOsFp = Format.getOs("web server", kb.headersFp)
 
@@ -37,6 +53,8 @@ class Fingerprint(GenericFingerprint):
 
         if not conf.extensiveFp:
             value += DBMS.PRESTO
+            if fork:
+                value += " (%s fork)" % fork
             return value
 
         actVer = Format.getDbms()
@@ -54,6 +72,9 @@ class Fingerprint(GenericFingerprint):
 
         if htmlErrorFp:
             value += "\n%shtml error message fingerprint: %s" % (blank, htmlErrorFp)
+
+        if fork:
+            value += "\n%sfork fingerprint: %s" % (blank, fork)
 
         return value
 
@@ -78,7 +99,7 @@ class Fingerprint(GenericFingerprint):
 
             if not result:
                 warnMsg = "the back-end DBMS is not %s" % DBMS.PRESTO
-                logger.warn(warnMsg)
+                logger.warning(warnMsg)
 
                 return False
 
@@ -132,6 +153,6 @@ class Fingerprint(GenericFingerprint):
             return True
         else:
             warnMsg = "the back-end DBMS is not %s" % DBMS.PRESTO
-            logger.warn(warnMsg)
+            logger.warning(warnMsg)
 
             return False
